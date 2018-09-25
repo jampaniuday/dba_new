@@ -1,0 +1,19 @@
+import norows
+disable constraints
+import data with ignore=y
+add pseudo records to a_business_process and a_conversation:
+-------------------------------------------------------------------------------------------
+INSERT INTO A_BUSINESS_PROCESS ( ID, START_TIME, END_TIME, INITIATOR_ID, INITIATOR_TYPE,
+LOGIC_MSG_ID, STATUS ) VALUES ( 
+-1,  SYSDATE, NULL, 0, 0, 0, 0); 
+INSERT INTO A_CONVERSATION ( ID, BUSINESS_PROCESS_ID, START_TIME, END_TIME, INITIATOR_ID,
+INITIATOR_TYPE, STATUS ) VALUES ( 
+-1, -1,  TO_Date( '12/31/2003 12:00:00 AM', 'MM/DD/YYYY HH:MI:SS AM'), NULL, 0, 0
+, 0); 
+COMMIT;
+-------------------------------------------------------------------------------------------
+enable constraints
+analyze tables
+compile invalid views
+remove jobs
+disable connectivity?

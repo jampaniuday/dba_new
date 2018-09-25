@@ -1,0 +1,119 @@
+WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK WHENEVER OSERROR  EXIT SQL.SQLCODE ROLLBACK 
+
+declare
+     lSchemaName varchar2(30) := 'SYS';
+begin
+  if ( SYS_CONTEXT ('USERENV', 'SESSION_USER')<> upper(lSchemaName)) THEN
+         raise_application_error(-20001, 'This script should be run under SYS user only.');
+  end if;
+end;
+/
+
+-- Required permissions
+--------------------------------------------------
+grant create any trigger to dba_apps;
+GRANT ADMINISTER DATABASE TRIGGER TO dba_apps;
+--------------------------------------------------
+
+
+CREATE TABLE dba_apps.ddl_log (
+operation   VARCHAR2(30),
+obj_owner   VARCHAR2(30),
+object_name VARCHAR2(30),
+sql_text    VARCHAR2(64),
+attempt_by  VARCHAR2(30),
+attempt_dt  DATE);
+
+CREATE OR REPLACE PROCEDURE dba_apps.log_proc (
+ose  ddl_log.operation%TYPE,
+odoo ddl_log.obj_owner%TYPE,
+odon ddl_log.object_name%TYPE)
+IS
+
+PRAGMA AUTONOMOUS_TRANSACTION;
+
+BEGIN
+  INSERT INTO dba_apps.ddl_log
+  SELECT ora_sysevent, ora_dict_obj_owner, 
+  ora_dict_obj_name, 'Not Allowed', USER, SYSDATE
+  FROM DUAL;
+  COMMIT;
+END log_proc;
+/
+
+
+CREATE OR REPLACE TRIGGER dba_apps.ddl_blocker
+BEFORE DROP OR TRUNCATE OR RENAME
+ON DATABASE
+
+DECLARE
+ oper ddl_log.operation%TYPE; 
+ v_action varchar2(4000);
+ v_module varchar2(4000);
+ v_datenum number;
+BEGIN
+
+v_action := NVL(SYS_CONTEXT('USERENV', 'ACTION'),'N/A');
+v_module := NVL(SYS_CONTEXT('USERENV', 'MODULE'),'N/A');
+v_datenum := to_char (sysdate,'D')||to_char (sysdate,'HH24');
+
+IF v_datenum >= 100 and v_datenum < 621 THEN
+	  IF NOT (v_action like 'SYS_%' or v_action = 'DDL_ENABLED') THEN
+        IF NOT (v_module like 'Data_Manager%' or v_module = 'Partition Manager' or Upper(v_module) like '%NEPTUNE%') THEN 
+
+  SELECT ora_sysevent
+  INTO oper
+  FROM DUAL;
+
+  log_proc(ora_sysevent, ora_dict_obj_owner, ora_dict_obj_name);
+
+    RAISE_APPLICATION_ERROR(-20999, 'DDL Blocker is active, no '||oper||' commands allowed, action was logged');
+ 
+		END IF;
+	END IF;
+END IF;
+END ddl_blocker;
+/
+
+
+create or replace public synonym ddl_log for dba_apps.ddl_log;
+
+grant select  on ddl_log to public;
+
+create or replace public synonym log_proc for dba_apps.log_proc;
+
+grant execute on log_proc to public;
+
+GRANT select ON gv_$open_cursor TO public;
+
+
+
+-------------------------------------------
+-- Session level disable
+exec DBMS_APPLICATION_INFO.SET_ACTION ('DDL_ENABLED'); 
+-------------------------------------------
+-- disable trigger:
+ALTER TRIGGER dba_apps.ddl_blocker DISABLE;
+-------------------------------------------
+-- enable trigger:
+ALTER TRIGGER dba_apps.ddl_blocker ENABLE;
+-------------------------------------------
+
+-- Monitor view
+
+CREATE OR REPLACE VIEW dba_apps.v_ddl_blocker_monitor  AS
+(SELECT TRIGGER_NAME,STATUS,
+       CASE WHEN STATUS = 'DISABLED' THEN 'WARNING'
+            WHEN STATUS = 'ENABLED'  THEN 'OK'
+            END Trigger_status
+from dba_triggers
+where owner = 'DBA_APPS' and TRIGGER_NAME ='DDL_BLOCKER'
+UNION
+SELECT 'DDL_BLOCKER','NOT EXISTS','CRITCAL'
+FROM dual
+WHERE 0 = ( SELECT COUNT(1)  FROM dba_triggers where owner = 'DBA_APPS' and TRIGGER_NAME ='DDL_BLOCKER'));
+
+-- Query
+SELECT * FROM dba_apps.v_ddl_blocker_monitor;
+
+

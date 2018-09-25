@@ -1,0 +1,20 @@
+CREATE TABLE MONITOR_RESULTS_TABLE_HIST
+(
+  EXECUTING_PRODECURE   VARCHAR2(1000 BYTE)     NOT NULL,
+  SAMPLE_TYPE           VARCHAR2(30 BYTE),
+  METRIC_TYPE           VARCHAR2(30 BYTE)       NOT NULL,
+  OWNER                 VARCHAR2(30 BYTE)       NOT NULL,
+  OBJECT_NAME           VARCHAR2(30 BYTE)       NOT NULL,
+  BEGIN_TIME_STAMP      TIMESTAMP(6)            NOT NULL,
+  SPEED                 NUMBER,
+  BEFORE_SPEED          NUMBER,
+  TOTAL_TIME_MS         NUMBER                  NOT NULL,
+  BEFORE_TOTAL_TIME_MS  NUMBER                  NOT NULL,
+  ALERT_ID              NUMBER                  NOT NULL,
+  ALERT_LEVEL           VARCHAR2(1 BYTE)        NOT NULL,
+  INVESTIGATION_ID      NUMBER                  NOT NULL,
+  ALERT_STATUS          NUMBER(1)               NOT NULL,
+  OBJECT_TYPE           VARCHAR2(30 BYTE),
+  ID                    NUMBER,
+  PUBLISH_ALERT         NUMBER(1)               DEFAULT 0
+);

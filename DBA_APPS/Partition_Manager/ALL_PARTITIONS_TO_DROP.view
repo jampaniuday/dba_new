@@ -1,0 +1,87 @@
+DECLARE
+  num_err number := 0;
+BEGIN
+  FOR curr IN (select 'alter table ' || owner ||'.PARTITIONS_TO_DROP add '|| column_name || ' ' || data_type cmd
+                from (
+                SELECT *
+                  FROM (SELECT owner
+                          FROM dba_tables
+                         WHERE table_name = 'PARTITIONS_TO_DROP') ow,
+                       (SELECT DISTINCT
+                               column_name,
+                               data_type || '(' || NVL (data_precision, data_length) || ')'
+                                  data_type
+                          FROM dba_tab_columns
+                         WHERE table_name = 'PARTITIONS_TO_DROP') col
+                MINUS
+                SELECT owner,
+                       column_name,
+                       data_type || '(' || NVL (data_precision, data_length) || ')' data_type
+                  FROM dba_tab_columns
+                 WHERE table_name = 'PARTITIONS_TO_DROP'
+                 ))
+  LOOP
+    BEGIN
+     execute immediate (curr.cmd);
+    EXCEPTION
+     when others then
+      dbms_output.put_line('Failed executing ' || curr.cmd || '. ' || SQLERRM);
+      num_err := 1;
+    END;
+  END LOOP;
+  
+  if num_err = 1 then
+    dbms_output.put_line('PARTITIONS_TO_DROP Tables are not identical.');
+  end if;
+END;
+/
+
+
+
+declare
+    cmd  varchar2(32000) := 'create or replace view ALL_PARTITIONS_TO_DROP as ';
+begin
+    FOR part
+    IN (select owner, table_name
+        from dba_tables
+        where table_name = 'PARTITIONS_TO_DROP'
+        order by owner)
+    LOOP
+      if cmd = 'create or replace view ALL_PARTITIONS_TO_DROP as ' then  
+        -- first table
+        cmd := cmd || 'select ''' || part.owner || ''' owner, ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a.* from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      else
+        cmd := cmd || ' union all select ''' || part.owner || ''' owner, ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a.* from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      end if;
+    END LOOP;
+    
+    execute immediate (cmd);
+end;
+/
+
+
+CREATE OR REPLACE TRIGGER io_PARTITIONS_TO_DROP
+  INSTEAD OF INSERT OR UPDATE OR DELETE
+  ON ALL_PARTITIONS_TO_DROP
+DECLARE
+BEGIN
+  
+  IF INSERTING THEN
+    null;                                
+    
+  ELSIF DELETING THEN
+    EXECUTE IMMEDIATE 'delete from ' || :OLD.OWNER || '.PARTITIONS_TO_DROP ' || ' WHERE TABLE_NAME = :TABLE_NAME and PARTITION_NAME = :PARTITION_NAME'
+    USING :OLD.TABLE_NAME, :OLD.PARTITION_NAME;
+    
+  ELSIF UPDATING THEN
+    null;
+  END IF;
+  
+END;
+/
+
+
+grant select, delete on ALL_PARTITIONS_TO_DROP to public;
+
+create or replace public synonym ALL_PARTITIONS_TO_DROP for ALL_PARTITIONS_TO_DROP;
+

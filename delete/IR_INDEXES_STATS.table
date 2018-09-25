@@ -1,0 +1,15 @@
+create table IR_INDEXES_STATS
+(
+    OWNER       varchar2(30) not null,
+    NAME        varchar2(30) not null,
+    HEIGHT      number       not null,
+    SIZE_MB     number       not null,
+    PCT_DELETED number       not null
+)
+/
+
+grant all on IR_INDEXES_STATS to PUBLIC
+/
+
+create public synonym IR_INDEXES_STATS for IR_INDEXES_STATS
+/

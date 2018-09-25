@@ -1,0 +1,15 @@
+CREATE TABLE QA_PAR_TEMPLATE_NAME
+(
+  TEMPLATE_ID    NUMBER,
+  TEMPLATE_NAME  VARCHAR2(100 BYTE)             NOT NULL,
+  DESCRIPTION    VARCHAR2(1000 BYTE)
+);
+
+
+--  There is no statement for index GS_PROD.SYS_C001769437.
+--  The object is created when the parent object is created.
+
+ALTER TABLE QA_PAR_TEMPLATE_NAME ADD (
+  PRIMARY KEY
+  (TEMPLATE_ID)
+  ENABLE VALIDATE);

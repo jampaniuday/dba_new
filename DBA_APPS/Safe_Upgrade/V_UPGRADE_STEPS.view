@@ -1,0 +1,29 @@
+CREATE OR REPLACE FORCE VIEW V_UPGRADE_STEPS AS
+SELECT ID,
+			 STATUS_H,
+       error_message,  
+			 ACTION_H,
+			 OBJECT_TYPE_H,
+       OBJECT_NAME,
+			 ALTER_ACTION_H,
+			 ALTER_OBJECT_TYPE_H,
+			 ALTER_OBJECT_NAME,
+			 CONSTRAINT_TYPE_H,
+			 table_columns,
+       parent_table,
+       parent_table_columns,
+       column_name,
+       column_type,
+       column_nullable,
+       column_default
+FROM   UPGRADE_STEPS;
+
+GRANT select ON V_UPGRADE_STEPS TO PUBLIC;
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM V_UPGRADE_STEPS FOR V_UPGRADE_STEPS';
+exception
+  when OTHERS then
+    null;
+end;
+/  

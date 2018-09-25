@@ -1,0 +1,85 @@
+create or replace force view SC_TABLES_SIZES_WOUT_INDEXES as
+with TABLES_SIZES_TEMP as (select SCHEMA_NAME,
+					              CAPTURE_TIME,
+								  TABLE_NAME,
+								  Sum(SIZE_MB) SIZE_MB,
+								  Sum(EST_NUM_OF_ROWS) EST_NUM_OF_ROWS,
+								  Sum(EST_AVG_ROW_SIZE_MB) EST_AVG_ROW_SIZE_MB
+						  from   SC_SEGMENTS_SIZES
+						  where  SEGMENT_TYPE <> 'INDEX'
+						  group by SCHEMA_NAME,
+								   CAPTURE_TIME,
+								   TABLE_NAME)
+select SCHEMA_NAME,
+       CAPTURE_TIME,
+	   TABLE_NAME,
+	   SIZE_MB,
+	   SIZE_MB - Nvl((select SIZE_MB 
+	                  from   TABLES_SIZES_TEMP TST2 
+					  where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						and  TST2.CAPTURE_TIME = (select Max(CAPTURE_TIME)
+												  from   TABLES_SIZES_TEMP TST3
+												  where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), SIZE_MB) CHANGE_IN_SIZE_MB,
+	   SIZE_MB - Nvl((select SIZE_MB 
+	                  from   TABLES_SIZES_TEMP TST2 
+					  where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						and  TST2.CAPTURE_TIME = (select Min(CAPTURE_TIME)
+												  from   TABLES_SIZES_TEMP TST3
+												  where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), SIZE_MB) TOTAL_CHANGE_IN_SIZE_MB,
+	   EST_NUM_OF_ROWS,
+	   Nvl2(EST_NUM_OF_ROWS, 
+			EST_NUM_OF_ROWS - Nvl((select EST_NUM_OF_ROWS 
+	                               from   TABLES_SIZES_TEMP TST2 
+					               where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						             and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						             and  TST2.CAPTURE_TIME = (select Max(CAPTURE_TIME)
+							                                   from   TABLES_SIZES_TEMP TST3
+												               where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													             and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													             and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), EST_NUM_OF_ROWS),
+			NULL) CHANGE_IN_EST_NUM_OF_ROWS,
+       Nvl2(EST_NUM_OF_ROWS,  
+			EST_NUM_OF_ROWS - Nvl((select EST_NUM_OF_ROWS 
+	                               from   TABLES_SIZES_TEMP TST2 
+					               where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						             and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						             and  TST2.CAPTURE_TIME = (select Min(CAPTURE_TIME)
+							                                   from   TABLES_SIZES_TEMP TST3
+												               where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													             and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													             and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), EST_NUM_OF_ROWS),
+			NULL) TOTAL_CHANGE_IN_EST_ROWS,
+	   EST_AVG_ROW_SIZE_MB,
+	   Nvl2(EST_AVG_ROW_SIZE_MB, 
+			EST_AVG_ROW_SIZE_MB - Nvl((select EST_AVG_ROW_SIZE_MB 
+	                                   from   TABLES_SIZES_TEMP TST2 
+					                   where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						                 and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						                 and  TST2.CAPTURE_TIME = (select Max(CAPTURE_TIME)
+										                           from   TABLES_SIZES_TEMP TST3
+												                   where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													                 and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													                 and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), EST_AVG_ROW_SIZE_MB),
+			NULL) CHANGE_IN_EST_AVG_ROW_SIZE_MB,								
+       Nvl2(EST_AVG_ROW_SIZE_MB, 
+			EST_AVG_ROW_SIZE_MB - Nvl((select EST_AVG_ROW_SIZE_MB 
+	                                   from   TABLES_SIZES_TEMP TST2 
+					                   where  TST2.SCHEMA_NAME  = TST.SCHEMA_NAME 
+						                 and  TST2.TABLE_NAME   = TST.TABLE_NAME 
+						                 and  TST2.CAPTURE_TIME = (select Min(CAPTURE_TIME)
+										                           from   TABLES_SIZES_TEMP TST3
+												                   where  TST3.SCHEMA_NAME  = TST2.SCHEMA_NAME
+													                 and  TST3.TABLE_NAME   = TST2.TABLE_NAME
+													                 and  TST3.CAPTURE_TIME < TST.CAPTURE_TIME)), EST_AVG_ROW_SIZE_MB),
+			NULL) TOTAL_CHANGE_EST_ROW_SIZE								
+from   TABLES_SIZES_TEMP TST
+order by SCHEMA_NAME,
+         TABLE_NAME,
+		 CAPTURE_TIME desc
+/

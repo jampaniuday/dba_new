@@ -1,0 +1,4 @@
+shutdown immediate;
+
+exit;
+

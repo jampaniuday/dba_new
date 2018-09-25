@@ -1,0 +1,1209 @@
+CREATE OR REPLACE PACKAGE Gather_Statistics AUTHID CURRENT_USER AS
+-- The package manages the procedure of gathering statistics.
+
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'Gather_Statistics';
+  VERSION    CONSTANT VARCHAR2(30) := '5.1';
+
+  -- version return function
+  FUNCTION FUNC_VERSION return VARCHAR2;
+
+  -- The procedure gathers statistics of the data dictionary.
+  PROCEDURE Dictionary;
+
+  -- The procedure gathers statistics of the schema.
+  PROCEDURE Schema(P_Schema_Name      in varchar2 default user,
+                   P_Clean_Histograms in number   default 0);
+
+  -- The procedure gathers statistics of the tables according to GS_TABLES records.
+  PROCEDURE Tables(P_Schema_Name      in varchar2 default user,
+                   P_Table_Name       in varchar2 default 'XXX',
+                   P_Clean_Histograms in number   default 0,
+                   P_run_id in number default 0,
+                   P_run_status in varchar2 default 'FINISHED');
+
+  -- The procedure gathers statistics of the columns according to GS_COLUMNS records.
+  PROCEDURE Column(P_Schema_Name      in varchar2 default user,
+                   P_Table_Name       in varchar2 default 'XXX',
+                   P_Column_Name      in varchar2 default 'XXX',
+                   P_Clean_Histograms in number   default 0);
+
+  -- The procedure computes histograms for the columns according to GS_HISTOGRAMS records.
+  PROCEDURE Histograms (P_Schema_Name in varchar2 default USER);
+
+  -- The procedure sets column related statistics according to GS_SET_COLUMNS records.
+  PROCEDURE Set_Columns(P_Schema_Name in varchar2 default user,
+                        P_Invalidate  in number default 0);
+
+  -- The procedure sets column related statistics on all local partitions of the table according to GS_SET_COLUMNS records,
+  PROCEDURE Set_C_Part(P_Schema_Name in varchar2 default user,
+                       P_Invalidate  in number default 0);
+
+  -- The procedure invalidates all the dependent cursors of the table.
+  PROCEDURE Invalidate_Dependent_Cursors(P_Schema_Name in varchar2 default user,
+                                         P_Table_Name  in varchar2);
+
+  FUNCTION check_stats RETURN VARCHAR2;
+END Gather_Statistics;
+/
+
+CREATE OR REPLACE PACKAGE BODY Gather_Statistics
+AS
+   v_errm   VARCHAR2 (200);
+
+   FUNCTION FUNC_VERSION
+      RETURN VARCHAR2
+   IS
+   BEGIN
+      RETURN VERSION;
+   END FUNC_VERSION;
+
+
+   PROCEDURE Dictionary
+   IS
+   BEGIN
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_Start,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+      Log_Manager.Write_To_Log_Table (
+         C_APP_NAME,
+         SYSTIMESTAMP,
+         'Gathering statistics of the Data Dictionary...',
+         NULL,
+         Log_Manager.Msg_Type_Info);
+
+      DBMS_STATS.Gather_Dictionary_Stats (
+         options      => 'GATHER',
+         method_opt   => 'FOR ALL COLUMNS SIZE AUTO');
+
+      DBMS_STATS.Gather_Fixed_Objects_Stats ();
+
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_End,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END;
+
+
+   PROCEDURE WRITE_TO_GATHER_STATS_LOG (v_run_id                IN NUMBER,
+                                        v_executing_prodecure   IN VARCHAR2,
+                                        v_owner                 IN VARCHAR2,
+                                        v_object_name           IN VARCHAR2,
+                                        v_object_type           IN VARCHAR2,
+                                        v_total_time_seconds    IN NUMBER,
+                                        v_begin_time_stamp      IN TIMESTAMP,
+                                        v_end_time_stamp        IN TIMESTAMP,
+                                        v_size_mb               IN NUMBER,
+                                        v_fields_number         IN NUMBER,
+                                        v_indexes_number        IN NUMBER,
+                                        v_end_status            IN VARCHAR2,
+                                        v_failed_status         IN VARCHAR2)
+   IS
+   BEGIN
+      INSERT INTO gather_stats_log (run_id,
+                                    executing_prodecure,
+                                    owner,
+                                    object_name,
+                                    object_type,
+                                    total_time_ms,
+                                    begin_time_stamp,
+                                    end_time_stamp,
+                                    size_mb,
+                                    fields_number,
+                                    indexes_number,
+                                    end_status,
+                                    failed_status)
+           VALUES (v_run_id,
+                   v_executing_prodecure,
+                   v_owner,
+                   v_object_name,
+                   v_object_type,
+                   v_total_time_seconds,
+                   v_begin_time_stamp,
+                   v_end_time_stamp,
+                   v_size_mb,
+                   v_fields_number,
+                   v_indexes_number,
+                   v_end_status,
+                   v_failed_status);
+
+      COMMIT;
+   END WRITE_TO_GATHER_STATS_LOG;
+
+   PROCEDURE Schema (P_Schema_Name        IN VARCHAR2 DEFAULT USER,
+                     P_Clean_Histograms   IN NUMBER DEFAULT 0)
+   IS
+      C_APP_NAME     CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Schema';
+
+      V_Hist                  VARCHAR2 (6);
+      l_run_id                NUMBER;
+      l_executing_prodecure   VARCHAR2 (30);
+      l_start_timestamp       TIMESTAMP;
+      l_end_timestamp         TIMESTAMP;
+   BEGIN
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_Start,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+      Log_Manager.Write_To_Log_Table (
+         C_APP_NAME,
+         SYSTIMESTAMP,
+         'Gathering statistics of the schema...',
+         NULL,
+         Log_Manager.Msg_Type_Info);
+
+      IF P_Clean_Histograms = 0
+      THEN
+         V_Hist := 'REPEAT';
+      ELSE
+         V_Hist := '1';
+      END IF;
+
+      l_run_id := gather_stats_log_seq.NEXTVAL;
+      l_executing_prodecure := 'Gather_schema';
+      l_start_timestamp := SYSTIMESTAMP;
+
+      FOR i IN (SELECT table_name
+                  FROM dba_tables
+                 WHERE owner = P_Schema_Name)
+      LOOP
+         tables (P_Schema_Name   => P_Schema_Name,
+                 P_Table_Name    => i.table_name,
+                 P_run_id        => l_run_id,
+                 P_run_status    => 'DONE');
+      END LOOP;
+
+      l_end_timestamp := SYSTIMESTAMP;
+
+      WRITE_TO_GATHER_STATS_LOG (
+         v_run_id                => l_run_id,
+         v_executing_prodecure   => l_executing_prodecure,
+         v_owner                 => P_Schema_Name,
+         v_object_name           => NULL,
+         v_object_type           => NULL,
+         v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num (l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+         v_begin_time_stamp      => l_start_timestamp,
+         v_end_time_stamp        => l_end_timestamp,
+         v_size_mb               => NULL,
+         v_fields_number         => NULL,
+         v_indexes_number        => NULL,
+         v_end_status            => 'FINISHED',
+         v_failed_status         => NULL);
+
+
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_End,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END;
+
+
+
+   PROCEDURE Tables (P_Schema_Name        IN VARCHAR2 DEFAULT USER,
+                     P_Table_Name         IN VARCHAR2 DEFAULT 'XXX',
+                     P_Clean_Histograms   IN NUMBER DEFAULT 0,
+                     P_run_id             IN NUMBER DEFAULT 0,
+                     P_run_status         IN VARCHAR2 DEFAULT 'FINISHED')
+   IS
+      C_APP_NAME     CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Tables';
+
+      V_Hist                  VARCHAR2 (6);
+      l_run_id                NUMBER;
+      l_executing_prodecure   VARCHAR2 (30);
+      l_start_timestamp       TIMESTAMP;
+      l_end_timestamp         TIMESTAMP;
+      l_object_type           VARCHAR2 (30);
+      l_size_mb               VARCHAR2 (30);
+      l_fields_number         VARCHAR2 (30);
+      l_indexes_number        VARCHAR2 (30);
+      l_check                 NUMBER;
+   BEGIN
+      IF P_run_status != 'DONE'
+      THEN
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_Start,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+      END IF;
+
+      BEGIN
+         IF P_Clean_Histograms = 0
+         THEN
+            V_Hist := 'REPEAT';
+         ELSE
+            V_Hist := '1';
+         END IF;
+
+         IF P_run_status != 'DONE'
+         THEN
+            Log_Manager.Write_To_Log_Table (
+               C_APP_NAME,
+               SYSTIMESTAMP,
+                  'Gathering statistics of table: '
+               || P_Schema_Name
+               || '.'
+               || P_Table_Name,
+               NULL,
+               Log_Manager.Msg_Type_Info);
+         END IF;
+
+         IF P_run_id = 0
+         THEN
+            l_run_id := gather_stats_log_seq.NEXTVAL;
+         ELSE
+            l_run_id := P_run_id;
+         END IF;
+
+         l_executing_prodecure := 'Gather_table';
+
+         BEGIN
+            SELECT COUNT (1)
+              INTO l_check
+              FROM dba_segments
+             WHERE     segment_name = P_Table_Name
+                   AND owner = P_Schema_Name
+                   AND segment_type LIKE 'TABLE%';
+
+            IF l_check = 0
+            THEN
+               l_size_mb := 0;
+               l_object_type := 'TABLE';
+            ELSE
+                 SELECT SUM (bytes / 1024 / 1024), segment_type
+                   INTO l_size_mb, l_object_type
+                   FROM dba_segments
+                  WHERE     segment_name = P_Table_Name
+                        AND owner = P_Schema_Name
+                        AND segment_type LIKE 'TABLE%'
+               GROUP BY segment_type;
+            END IF;
+
+            SELECT COUNT (1)
+              INTO l_fields_number
+              FROM dba_tab_columns
+             WHERE table_name = P_Table_Name AND owner = P_Schema_Name;
+
+            SELECT COUNT (1)
+              INTO l_indexes_number
+              FROM dba_indexes
+             WHERE table_name = P_Table_Name AND owner = P_Schema_Name;
+
+
+            l_start_timestamp := SYSTIMESTAMP;
+            DBMS_STATS.Gather_Table_Stats (
+               ownname      => P_Schema_Name,
+               tabname      => P_TABLE_NAME,
+               cascade      => FALSE,
+               method_opt   => 'FOR ALL COLUMNS SIZE ' || V_Hist);
+            l_end_timestamp := SYSTIMESTAMP;
+
+            WRITE_TO_GATHER_STATS_LOG (
+               v_run_id                => l_run_id,
+               v_executing_prodecure   => l_executing_prodecure,
+               v_owner                 => P_Schema_Name,
+               v_object_name           => P_TABLE_NAME,
+               v_object_type           => l_object_type,
+               v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+               v_begin_time_stamp      => l_start_timestamp,
+               v_end_time_stamp        => l_end_timestamp,
+               v_size_mb               => l_size_mb,
+               v_fields_number         => l_fields_number,
+               v_indexes_number        => l_indexes_number,
+               v_end_status            => P_run_status,
+               v_failed_status         => NULL);
+
+            ---- Handling indexes
+
+            BEGIN
+               FOR i
+                  IN (SELECT index_name
+                        FROM dba_indexes
+                       WHERE     owner = P_Schema_Name
+                             AND table_name = P_Table_Name)
+               LOOP
+                  SELECT COUNT (1)
+                    INTO l_check
+                    FROM dba_segments
+                   WHERE     segment_name = i.index_name
+                         AND owner = P_Schema_Name
+                         AND segment_type LIKE 'INDEX%';
+
+                  IF l_check = 0
+                  THEN
+                     l_size_mb := 0;
+                     l_object_type := 'INDEX';
+                  ELSE
+                       SELECT SUM (bytes / 1024 / 1024), segment_type
+                         INTO l_size_mb, l_object_type
+                         FROM dba_segments
+                        WHERE     segment_name = i.index_name
+                              AND owner = P_Schema_Name
+                              AND segment_type LIKE 'INDEX%'
+                     GROUP BY segment_type;
+                  END IF;
+
+                  BEGIN
+                     l_start_timestamp := SYSTIMESTAMP;
+                     DBMS_STATS.Gather_index_Stats (
+                        ownname   => P_Schema_Name,
+                        indname   => i.index_name);
+                     l_end_timestamp := SYSTIMESTAMP;
+
+                     WRITE_TO_GATHER_STATS_LOG (
+                        v_run_id                => l_run_id,
+                        v_executing_prodecure   => l_executing_prodecure,
+                        v_owner                 => P_Schema_Name,
+                        v_object_name           => i.index_name,
+                        v_object_type           => l_object_type,
+                        v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+                        v_begin_time_stamp      => l_start_timestamp,
+                        v_end_time_stamp        => l_end_timestamp,
+                        v_size_mb               => l_size_mb,
+                        v_fields_number         => NULL,
+                        v_indexes_number        => NULL,
+                        v_end_status            => 'DONE',
+                        v_failed_status         => NULL);
+                  EXCEPTION
+                     WHEN OTHERS
+                     THEN
+                        l_end_timestamp := SYSTIMESTAMP;
+
+                        IF SQLCODE = '-20005'
+                        THEN
+                           WRITE_TO_GATHER_STATS_LOG (
+                              v_run_id                => l_run_id,
+                              v_executing_prodecure   => l_executing_prodecure,
+                              v_owner                 => P_Schema_Name,
+                              v_object_name           => i.index_name,
+                              v_object_type           => l_object_type,
+                              v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+                              v_begin_time_stamp      => l_start_timestamp,
+                              v_end_time_stamp        => l_end_timestamp,
+                              v_size_mb               => l_size_mb,
+                              v_fields_number         => NULL,
+                              v_indexes_number        => NULL,
+                              v_end_status            => 'INFO',
+                              v_failed_status         => 'LOCKED');
+                        ELSE
+                           WRITE_TO_GATHER_STATS_LOG (
+                              v_run_id                => l_run_id,
+                              v_executing_prodecure   => l_executing_prodecure,
+                              v_owner                 => P_Schema_Name,
+                              v_object_name           => i.index_name,
+                              v_object_type           => l_object_type,
+                              v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+                              v_begin_time_stamp      => l_start_timestamp,
+                              v_end_time_stamp        => l_end_timestamp,
+                              v_size_mb               => l_size_mb,
+                              v_fields_number         => NULL,
+                              v_indexes_number        => NULL,
+                              v_end_status            => 'FAILED',
+                              v_failed_status         => SQLCODE);
+                        END IF;
+                  END;
+               END LOOP;
+            END;
+         EXCEPTION
+            WHEN OTHERS
+            THEN
+               l_end_timestamp := SYSTIMESTAMP;
+
+               IF SQLCODE = '-20005'
+               THEN
+                  WRITE_TO_GATHER_STATS_LOG (
+                     v_run_id                => l_run_id,
+                     v_executing_prodecure   => l_executing_prodecure,
+                     v_owner                 => P_Schema_Name,
+                     v_object_name           => P_TABLE_NAME,
+                     v_object_type           => l_object_type,
+                     v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+                     v_begin_time_stamp      => l_start_timestamp,
+                     v_end_time_stamp        => l_end_timestamp,
+                     v_size_mb               => l_size_mb,
+                     v_fields_number         => NULL,
+                     v_indexes_number        => NULL,
+                     v_end_status            => 'INFO',
+                     v_failed_status         => 'LOCKED');
+               ELSE
+                  WRITE_TO_GATHER_STATS_LOG (
+                     v_run_id                => l_run_id,
+                     v_executing_prodecure   => l_executing_prodecure,
+                     v_owner                 => P_Schema_Name,
+                     v_object_name           => P_TABLE_NAME,
+                     v_object_type           => l_object_type,
+                     v_total_time_seconds    =>   CMN_DB_UTILS_PKG.timestamp2num ( l_end_timestamp) - CMN_DB_UTILS_PKG.timestamp2num (l_start_timestamp),
+                     v_begin_time_stamp      => l_start_timestamp,
+                     v_end_time_stamp        => l_end_timestamp,
+                     v_size_mb               => l_size_mb,
+                     v_fields_number         => NULL,
+                     v_indexes_number        => NULL,
+                     v_end_status            => 'FAILED',
+                     v_failed_status         => SQLCODE);
+               END IF;
+         END;
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            v_errm := SUBSTR (SQLERRM, 1, 200);
+
+            IF P_run_status != 'DONE'
+            THEN
+               Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                               SYSTIMESTAMP,
+                                               'Error: ' || v_errm,
+                                               NULL,
+                                               Log_Manager.Msg_Type_Error);
+            END IF;
+      END;
+
+      IF P_run_status != 'DONE'
+      THEN
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+      END IF;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+
+         IF P_run_status != 'DONE'
+         THEN
+            Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                            SYSTIMESTAMP,
+                                            'Error: ' || v_errm,
+                                            NULL,
+                                            Log_Manager.Msg_Type_Error);
+         END IF;
+
+         IF P_run_status != 'DONE'
+         THEN
+            Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                            SYSTIMESTAMP,
+                                            Log_Manager.Msg_App_End,
+                                            NULL,
+                                            Log_Manager.Msg_Type_Info);
+         END IF;
+   END;
+
+
+
+   PROCEDURE Column (P_Schema_Name        IN VARCHAR2 DEFAULT USER,
+                     P_Table_Name         IN VARCHAR2 DEFAULT 'XXX',
+                     P_Column_Name        IN VARCHAR2 DEFAULT 'XXX',
+                     P_Clean_Histograms   IN NUMBER DEFAULT 0)
+   IS
+      C_APP_NAME   CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Column';
+
+      V_Hist                VARCHAR2 (6);
+   BEGIN
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_Start,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+
+      IF P_Table_Name = 'XXX'
+      THEN
+         -- Running over the columns.
+         FOR r_column_to_gather
+            IN (  SELECT TABLE_NAME, COLUMN_NAME, IS_CLEAN_HISTOGRAMS
+                    FROM GS_COLUMNS
+                   WHERE (OWNER = P_Schema_Name OR OWNER IS NULL)
+                ORDER BY ORDER_SEQUENCE ASC)
+         LOOP
+            BEGIN
+               IF r_column_to_gather.IS_CLEAN_HISTOGRAMS = 0
+               THEN
+                  V_Hist := 'REPEAT';
+               ELSE
+                  V_Hist := '1';
+               END IF;
+
+               Log_Manager.Write_To_Log_Table (
+                  C_APP_NAME,
+                  SYSTIMESTAMP,
+                     'Gathering statistics of column: '
+                  || P_Schema_Name
+                  || '.'
+                  || r_column_to_gather.TABLE_NAME
+                  || '.'
+                  || r_column_to_gather.COLUMN_NAME,
+                  NULL,
+                  Log_Manager.Msg_Type_Info);
+
+               DBMS_STATS.Gather_Table_Stats (
+                  ownname      => P_Schema_Name,
+                  tabname      => r_column_to_gather.TABLE_NAME,
+                  method_opt   =>    'FOR COLUMNS '
+                                  || r_column_to_gather.COLUMN_NAME
+                                  || ' SIZE '
+                                  || V_Hist);
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  v_errm := SUBSTR (SQLERRM, 1, 200);
+                  Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                                  SYSTIMESTAMP,
+                                                  'Error: ' || v_errm,
+                                                  NULL,
+                                                  Log_Manager.Msg_Type_Error);
+            END;
+         END LOOP;
+      ELSE
+         BEGIN
+            IF P_Clean_Histograms = 0
+            THEN
+               V_Hist := 'REPEAT';
+            ELSE
+               V_Hist := '1';
+            END IF;
+
+            Log_Manager.Write_To_Log_Table (
+               C_APP_NAME,
+               SYSTIMESTAMP,
+                  'Gathering statistics of column: '
+               || P_Schema_Name
+               || '.'
+               || P_Table_Name
+               || '.'
+               || P_Column_Name,
+               NULL,
+               Log_Manager.Msg_Type_Info);
+            DBMS_STATS.Gather_Table_Stats (
+               ownname      => P_Schema_Name,
+               tabname      => P_Table_Name,
+               method_opt   =>    'FOR COLUMNS '
+                               || P_Column_Name
+                               || ' SIZE '
+                               || V_Hist);
+         EXCEPTION
+            WHEN OTHERS
+            THEN
+               v_errm := SUBSTR (SQLERRM, 1, 200);
+               Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                               SYSTIMESTAMP,
+                                               'Error: ' || v_errm,
+                                               NULL,
+                                               Log_Manager.Msg_Type_Error);
+         END;
+      END IF;
+
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_End,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END;
+
+
+
+   PROCEDURE Histograms (P_Schema_Name IN VARCHAR2 DEFAULT USER)
+   IS
+      C_APP_NAME   CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Histograms';
+   BEGIN
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_Start,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+
+      FOR r_column_to_gather IN (SELECT TABLE_NAME, COLUMN_NAME
+                                   FROM ALL_GS_HISTOGRAMS
+                                  WHERE owner = P_Schema_Name)
+      LOOP
+         BEGIN
+            Log_Manager.Write_To_Log_Table (
+               C_APP_NAME,
+               SYSTIMESTAMP,
+                  'Computing histogram of column: '
+               || r_column_to_gather.TABLE_NAME
+               || '.'
+               || r_column_to_gather.COLUMN_NAME,
+               NULL,
+               Log_Manager.Msg_Type_Info);
+            DBMS_STATS.Gather_Table_Stats (
+               ownname      => P_Schema_Name,
+               tabname      => r_column_to_gather.TABLE_NAME,
+               method_opt   =>    'FOR COLUMNS '
+                               || r_column_to_gather.COLUMN_NAME
+                               || ' SIZE 254');
+         EXCEPTION
+            WHEN OTHERS
+            THEN
+               v_errm := SUBSTR (SQLERRM, 1, 200);
+               Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                               SYSTIMESTAMP,
+                                               'Error: ' || v_errm,
+                                               NULL,
+                                               Log_Manager.Msg_Type_Error);
+         END;
+      END LOOP;
+
+      Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                      SYSTIMESTAMP,
+                                      Log_Manager.Msg_App_End,
+                                      NULL,
+                                      Log_Manager.Msg_Type_Info);
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END;
+
+
+
+   PROCEDURE Set_Columns (P_Schema_Name   IN VARCHAR2 DEFAULT USER,
+                          P_Invalidate    IN NUMBER DEFAULT 0)
+   IS
+      C_APP_NAME   CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Set_Columns';
+
+      CURR_TIME    CONSTANT DATE := SYSDATE;
+
+      High_Value_Date       DATE;
+      Low_Value_Date        DATE;
+
+      High_Value_Number     NUMBER;
+      Low_Value_Number      NUMBER;
+
+      SRecDate              DBMS_STATS.Statrec;
+      NoValsDate            DBMS_STATS.DateArray;
+
+      SRecNumber            DBMS_STATS.Statrec;
+      NoValsNumber          DBMS_STATS.NumArray;
+
+      Dummy_1               NUMBER;
+      Dummy_2               NUMBER;
+      Dummy_3               NUMBER;
+      Dummy_4               NUMBER;
+
+      Is_1st_Run            NUMBER;
+   BEGIN
+      FOR r_column_to_set
+         IN (SELECT TABLE_NAME,
+                    COLUMN_NAME,
+                    DATA_TYPE,
+                    HIGH_VALUE_NUMBER,
+                    LOW_VALUE_NUMBER,
+                    HIGH_VALUE_DATE,
+                    LOW_VALUE_DATE,
+                    HIGH_VALUE_DATE_OFFSET,
+                    LOW_VALUE_DATE_OFFSET,
+                    DISTINCT_VALUES,
+                    DENSITY,
+                    NULLS,
+                    AVG_LEN_BYTES
+               FROM ALL_GS_SET_COLUMNS
+              WHERE enabled = 'y' AND PARTITION = 0        -- not partitioned.
+                                                   AND owner = P_Schema_Name)
+      LOOP
+         BEGIN
+            -- Checking if this is the 1st manual change of the stats for the column.
+            BEGIN
+               SELECT DECODE (USER_STATS,  'NO', 1,  'YES', 0)
+                 INTO Is_1st_Run
+                 FROM USER_TAB_COL_STATISTICS
+                WHERE     TABLE_NAME = r_column_to_set.TABLE_NAME
+                      AND COLUMN_NAME = r_column_to_set.COLUMN_NAME;
+            EXCEPTION
+               WHEN NO_DATA_FOUND
+               THEN
+                  Is_1st_Run := 0;
+            END;
+
+            IF r_column_to_set.DATA_TYPE = 'NUMBER'
+            THEN
+               DBMS_STATS.Get_Column_Stats (
+                  ownname   => P_Schema_Name,
+                  tabname   => r_column_to_set.TABLE_NAME,
+                  colname   => r_column_to_set.COLUMN_NAME,
+                  srec      => SRecNumber,
+                  distcnt   => Dummy_1,
+                  density   => Dummy_2,
+                  nullcnt   => Dummy_3,
+                  avgclen   => Dummy_4);
+
+               IF r_column_to_set.HIGH_VALUE_NUMBER IS NOT NULL
+               THEN
+                  High_Value_Number := r_column_to_set.HIGH_VALUE_NUMBER;
+               ELSE
+                  DBMS_STATS.Convert_Raw_Value (SRecNumber.maxval,
+                                                High_Value_Number);
+               END IF;
+
+               IF r_column_to_set.LOW_VALUE_NUMBER IS NOT NULL
+               THEN
+                  Low_Value_Number := r_column_to_set.LOW_VALUE_NUMBER;
+               ELSE
+                  DBMS_STATS.Convert_Raw_Value (SRecNumber.minval,
+                                                Low_Value_Number);
+               END IF;
+
+               NoValsNumber :=
+                  DBMS_STATS.NumArray (Low_Value_Number, High_Value_Number);
+
+               SRecNumber.EPC := 2;
+               SRecNumber.BkVals := NULL;
+
+               DBMS_STATS.Prepare_Column_Values (SRecNumber, NoValsNumber);
+
+               DBMS_STATS.Set_Column_Stats (
+                  ownname         => P_Schema_Name,
+                  tabname         => r_column_to_set.TABLE_NAME,
+                  colname         => r_column_to_set.COLUMN_NAME,
+                  srec            => SRecNumber,
+                  distcnt         => r_column_to_set.DISTINCT_VALUES,
+                  density         => r_column_to_set.DENSITY,
+                  nullcnt         => r_column_to_set.NULLS,
+                  avgclen         => r_column_to_set.AVG_LEN_BYTES,
+                  no_invalidate   => TRUE);
+            ELSIF r_column_to_set.DATA_TYPE = 'DATE'
+            THEN
+               DBMS_STATS.Get_Column_Stats (
+                  ownname   => P_Schema_Name,
+                  tabname   => r_column_to_set.TABLE_NAME,
+                  colname   => r_column_to_set.COLUMN_NAME,
+                  srec      => SRecDate,
+                  distcnt   => Dummy_1,
+                  density   => Dummy_2,
+                  nullcnt   => Dummy_3,
+                  avgclen   => Dummy_4);
+
+               IF r_column_to_set.HIGH_VALUE_DATE IS NOT NULL
+               THEN
+                  High_Value_Date := r_column_to_set.HIGH_VALUE_DATE;
+               ELSIF r_column_to_set.HIGH_VALUE_DATE_OFFSET IS NOT NULL
+               THEN
+                  High_Value_Date :=
+                     CURR_TIME + r_column_to_set.HIGH_VALUE_DATE_OFFSET;
+               ELSE
+                  DBMS_STATS.Convert_Raw_Value (SRecDate.maxval,
+                                                High_Value_Date);
+               END IF;
+
+               IF r_column_to_set.LOW_VALUE_DATE IS NOT NULL
+               THEN
+                  Low_Value_Date := r_column_to_set.LOW_VALUE_DATE;
+               ELSIF r_column_to_set.LOW_VALUE_DATE_OFFSET IS NOT NULL
+               THEN
+                  Low_Value_Date :=
+                     CURR_TIME + r_column_to_set.LOW_VALUE_DATE_OFFSET;
+               ELSE
+                  DBMS_STATS.Convert_Raw_Value (SRecDate.minval,
+                                                Low_Value_Date);
+               END IF;
+
+               NoValsDate :=
+                  DBMS_STATS.DateArray (Low_Value_Date, High_Value_Date);
+
+               SRecDate.EPC := 2;
+               SRecDate.BkVals := NULL;
+
+               DBMS_STATS.Prepare_Column_Values (SRecDate, NoValsDate);
+
+               DBMS_STATS.Set_Column_Stats (
+                  ownname         => P_Schema_Name,
+                  tabname         => r_column_to_set.TABLE_NAME,
+                  colname         => r_column_to_set.COLUMN_NAME,
+                  srec            => SRecDate,
+                  distcnt         => r_column_to_set.DISTINCT_VALUES,
+                  density         => r_column_to_set.DENSITY,
+                  nullcnt         => r_column_to_set.NULLS,
+                  avgclen         => r_column_to_set.AVG_LEN_BYTES,
+                  no_invalidate   => TRUE);
+            END IF;
+
+            IF (P_Invalidate = 1 OR Is_1st_Run = 1)
+            THEN
+               Invalidate_Dependent_Cursors (
+                  P_Schema_Name   => P_Schema_Name,
+                  P_Table_Name    => r_column_to_set.TABLE_NAME);
+            END IF;
+         EXCEPTION
+            WHEN OTHERS
+            THEN
+               IF SQLCODE = -20000
+               THEN
+                  NULL;
+               ELSE
+                  v_errm := SUBSTR (SQLERRM, 1, 200);
+                  Log_Manager.Write_To_Log_Table (C_APP_NAME || ' - 2',
+                                                  SYSTIMESTAMP,
+                                                  'Error: ' || v_errm,
+                                                  NULL,
+                                                  Log_Manager.Msg_Type_Error);
+               END IF;
+         END;
+      END LOOP;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME || ' - 1',
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END;
+
+   PROCEDURE Invalidate_Dependent_Cursors (
+      P_Schema_Name   IN VARCHAR2 DEFAULT USER,
+      P_Table_Name    IN VARCHAR2)
+   IS
+      C_APP_NAME   CONSTANT VARCHAR2 (60)
+         := 'Gather_Statistics.Invalidate_Dependent_Cursors' ;
+   BEGIN
+      EXECUTE IMMEDIATE
+            'comment on table '
+         || P_Schema_Name
+         || '.'
+         || P_Table_Name
+         || ' is ''Dependent cursors were invalidated at '
+         || TO_CHAR (SYSDATE, 'DD-MON-YYYY HH24:MI:SS')
+         || ' by Gather_Statistics.Invalidate_Dependent_Cursor.''';
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+   END;
+
+
+
+   PROCEDURE Set_C_Part (P_Schema_Name   IN VARCHAR2 DEFAULT USER,
+                         P_Invalidate    IN NUMBER DEFAULT 0)
+   IS
+      C_APP_NAME   CONSTANT VARCHAR2 (30) := 'Gather_Statistics.Set_Columns';
+
+      CURR_TIME    CONSTANT DATE := SYSDATE;
+
+      High_Value_Date       DATE;
+      Low_Value_Date        DATE;
+
+      High_Value_Number     NUMBER;
+      Low_Value_Number      NUMBER;
+
+      SRecDate              DBMS_STATS.Statrec;
+      NoValsDate            DBMS_STATS.DateArray;
+
+      SRecNumber            DBMS_STATS.Statrec;
+      NoValsNumber          DBMS_STATS.NumArray;
+
+      Dummy_1               NUMBER;
+      Dummy_2               NUMBER;
+      Dummy_3               NUMBER;
+      Dummy_4               NUMBER;
+
+      Is_1st_Run            NUMBER;
+   BEGIN
+      FOR r_column_to_set
+         IN (SELECT TABLE_NAME,
+                    COLUMN_NAME,
+                    DATA_TYPE,
+                    HIGH_VALUE_NUMBER,
+                    LOW_VALUE_NUMBER,
+                    HIGH_VALUE_DATE,
+                    LOW_VALUE_DATE,
+                    HIGH_VALUE_DATE_OFFSET,
+                    LOW_VALUE_DATE_OFFSET,
+                    DISTINCT_VALUES,
+                    DENSITY,
+                    NULLS,
+                    AVG_LEN_BYTES
+               FROM ALL_GS_SET_COLUMNS
+              WHERE enabled = 'y' AND PARTITION = 1     -- partitioned tables.
+                                                   AND owner = P_Schema_Name)
+      LOOP
+         FOR i
+            IN (SELECT table_owner, table_name, partition_name
+                  FROM dba_tab_partitions
+                 WHERE     table_owner = P_Schema_Name
+                       AND TABLE_NAME = r_column_to_set.TABLE_NAME)
+         LOOP
+            BEGIN
+               -- Checking if this is the 1st manual change of the stats for the column.
+               BEGIN
+                  SELECT DECODE (USER_STATS,  'NO', 1,  'YES', 0)
+                    INTO Is_1st_Run
+                    FROM USER_TAB_COL_STATISTICS
+                   WHERE     TABLE_NAME = r_column_to_set.TABLE_NAME
+                         AND COLUMN_NAME = r_column_to_set.COLUMN_NAME;
+               EXCEPTION
+                  WHEN NO_DATA_FOUND
+                  THEN
+                     Is_1st_Run := 0;
+               END;
+
+               IF r_column_to_set.DATA_TYPE = 'NUMBER'
+               THEN
+                  DBMS_STATS.Get_Column_Stats (
+                     ownname    => P_Schema_Name,
+                     tabname    => r_column_to_set.TABLE_NAME,
+                     colname    => r_column_to_set.COLUMN_NAME,
+                     srec       => SRecNumber,
+                     partname   => i.partition_name,
+                     distcnt    => Dummy_1,
+                     density    => Dummy_2,
+                     nullcnt    => Dummy_3,
+                     avgclen    => Dummy_4);
+
+                  IF r_column_to_set.HIGH_VALUE_NUMBER IS NOT NULL
+                  THEN
+                     High_Value_Number := r_column_to_set.HIGH_VALUE_NUMBER;
+                  ELSE
+                     DBMS_STATS.Convert_Raw_Value (SRecNumber.maxval,
+                                                   High_Value_Number);
+                  END IF;
+
+                  IF r_column_to_set.LOW_VALUE_NUMBER IS NOT NULL
+                  THEN
+                     Low_Value_Number := r_column_to_set.LOW_VALUE_NUMBER;
+                  ELSE
+                     DBMS_STATS.Convert_Raw_Value (SRecNumber.minval,
+                                                   Low_Value_Number);
+                  END IF;
+
+                  NoValsNumber :=
+                     DBMS_STATS.NumArray (Low_Value_Number,
+                                          High_Value_Number);
+
+                  SRecNumber.EPC := 2;
+                  SRecNumber.BkVals := NULL;
+
+                  DBMS_STATS.Prepare_Column_Values (SRecNumber, NoValsNumber);
+
+                  DBMS_STATS.Set_Column_Stats (
+                     ownname         => P_Schema_Name,
+                     tabname         => r_column_to_set.TABLE_NAME,
+                     colname         => r_column_to_set.COLUMN_NAME,
+                     srec            => SRecNumber,
+                     partname        => i.partition_name,
+                     distcnt         => r_column_to_set.DISTINCT_VALUES,
+                     density         => r_column_to_set.DENSITY,
+                     nullcnt         => r_column_to_set.NULLS,
+                     avgclen         => r_column_to_set.AVG_LEN_BYTES,
+                     no_invalidate   => TRUE);
+               ELSIF r_column_to_set.DATA_TYPE = 'DATE'
+               THEN
+                  DBMS_STATS.Get_Column_Stats (
+                     ownname    => P_Schema_Name,
+                     tabname    => r_column_to_set.TABLE_NAME,
+                     colname    => r_column_to_set.COLUMN_NAME,
+                     srec       => SRecDate,
+                     partname   => i.partition_name,
+                     distcnt    => Dummy_1,
+                     density    => Dummy_2,
+                     nullcnt    => Dummy_3,
+                     avgclen    => Dummy_4);
+
+                  IF r_column_to_set.HIGH_VALUE_DATE IS NOT NULL
+                  THEN
+                     High_Value_Date := r_column_to_set.HIGH_VALUE_DATE;
+                  ELSIF r_column_to_set.HIGH_VALUE_DATE_OFFSET IS NOT NULL
+                  THEN
+                     High_Value_Date :=
+                        CURR_TIME + r_column_to_set.HIGH_VALUE_DATE_OFFSET;
+                  ELSE
+                     DBMS_STATS.Convert_Raw_Value (SRecDate.maxval,
+                                                   High_Value_Date);
+                  END IF;
+
+                  IF r_column_to_set.LOW_VALUE_DATE IS NOT NULL
+                  THEN
+                     Low_Value_Date := r_column_to_set.LOW_VALUE_DATE;
+                  ELSIF r_column_to_set.LOW_VALUE_DATE_OFFSET IS NOT NULL
+                  THEN
+                     Low_Value_Date :=
+                        CURR_TIME + r_column_to_set.LOW_VALUE_DATE_OFFSET;
+                  ELSE
+                     DBMS_STATS.Convert_Raw_Value (SRecDate.minval,
+                                                   Low_Value_Date);
+                  END IF;
+
+                  NoValsDate :=
+                     DBMS_STATS.DateArray (Low_Value_Date, High_Value_Date);
+
+                  SRecDate.EPC := 2;
+                  SRecDate.BkVals := NULL;
+
+                  DBMS_STATS.Prepare_Column_Values (SRecDate, NoValsDate);
+
+                  DBMS_STATS.Set_Column_Stats (
+                     ownname         => P_Schema_Name,
+                     tabname         => r_column_to_set.TABLE_NAME,
+                     colname         => r_column_to_set.COLUMN_NAME,
+                     srec            => SRecDate,
+                     partname        => i.partition_name,
+                     distcnt         => r_column_to_set.DISTINCT_VALUES,
+                     density         => r_column_to_set.DENSITY,
+                     nullcnt         => r_column_to_set.NULLS,
+                     avgclen         => r_column_to_set.AVG_LEN_BYTES,
+                     no_invalidate   => TRUE);
+               END IF;
+
+               IF (P_Invalidate = 1 OR Is_1st_Run = 1)
+               THEN
+                  Invalidate_Dependent_Cursors (
+                     P_Schema_Name   => P_Schema_Name,
+                     P_Table_Name    => r_column_to_set.TABLE_NAME);
+               END IF;
+            EXCEPTION
+               WHEN OTHERS
+               THEN
+                  IF SQLCODE = -20000
+                  THEN
+                     NULL;
+                  ELSE
+                     v_errm := SUBSTR (SQLERRM, 1, 200);
+                     Log_Manager.Write_To_Log_Table (
+                        C_APP_NAME || ' - 2',
+                        SYSTIMESTAMP,
+                        'Error: ' || v_errm,
+                        NULL,
+                        Log_Manager.Msg_Type_Error);
+                  END IF;
+            END;
+         END LOOP;
+      END LOOP;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         ROLLBACK;
+         v_errm := SUBSTR (SQLERRM, 1, 200);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME || ' - 1',
+                                         SYSTIMESTAMP,
+                                         'Error: ' || v_errm,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Error);
+         Log_Manager.Write_To_Log_Table (C_APP_NAME,
+                                         SYSTIMESTAMP,
+                                         Log_Manager.Msg_App_End,
+                                         NULL,
+                                         Log_Manager.Msg_Type_Info);
+   END Set_C_Part;
+
+
+
+   FUNCTION check_stats
+      RETURN VARCHAR2
+   IS
+      L_THERE_IS_TABLE_WITH_NO_STATS   NUMBER;
+      L_EXISTS_TABLE_ROWS_AND_STAT_0   NUMBER;
+      l_returnval                      VARCHAR2 (32767);
+   BEGIN
+      SELECT COUNT (*)
+        INTO L_THERE_IS_TABLE_WITH_NO_STATS
+        FROM USER_TABLES T
+       WHERE LAST_ANALYZED IS NULL AND ROWNUM < 2;
+
+      IF L_THERE_IS_TABLE_WITH_NO_STATS = 1
+      THEN
+         DBMS_OUTPUT.PUT_LINE (
+            'At least one table on schema has no statistics at all');
+         l_returnval :=
+               l_returnval
+            || 'At least one table on schema has no statistics at all';
+      END IF;
+
+      FOR I IN (SELECT T.TABLE_NAME
+                  FROM USER_TABLES T
+                 WHERE NUM_ROWS = 0)
+      LOOP
+         EXECUTE IMMEDIATE
+            'select count(*) from ' || I.TABLE_NAME || ' where rownum < 2'
+            INTO L_EXISTS_TABLE_ROWS_AND_STAT_0;
+
+         IF L_EXISTS_TABLE_ROWS_AND_STAT_0 = 1
+         THEN
+            DBMS_OUTPUT.PUT_LINE (
+                  'At least one table ('
+               || I.TABLE_NAME
+               || ') on schema has statistics saying it is empty while there are rows on the table');
+            l_returnval :=
+                  l_returnval
+               || CHR (10)
+               || 'At least one table ('
+               || I.TABLE_NAME
+               || ') on schema has statistics saying it is empty while there are rows on the table';
+            EXIT;
+         END IF;
+      END LOOP;
+
+      RETURN l_returnval;
+   END;
+END Gather_Statistics;
+/

@@ -1,0 +1,66 @@
+-- Create table
+create table UPGRADE_STEPS
+(
+  id                   NUMBER(30) not null,
+  schema               varchar2(30) default USER not null,
+  upgrade_id           NUMBER,
+  date_added           DATE default SYSDATE not null,
+  status               NUMBER(2) DEFAULT 0 not null,
+  action               NUMBER(2) not null,
+  error_message        VARCHAR2(4000),
+  object_type          NUMBER(2) not null,
+  object_name          VARCHAR2(30) not null,
+  alter_action         NUMBER(2),
+  alter_object_type    NUMBER(2),
+  alter_object_name    VARCHAR2(30),
+  INDEX_unique         VARCHAR2(30),
+  column_name          VARCHAR2(30),
+  column_type          VARCHAR2(30),
+  column_default       VARCHAR2(30),
+  column_nullable      VARCHAR2(30),
+  constraint_type      NUMBER(2),
+  table_columns              VARCHAR2(2000),
+  parent_table         VARCHAR2(30),
+  parent_table_columns VARCHAR2(2000),
+  status_h             as (DECODE(TO_CHAR("STATUS"),NULL,NULL,'0','Waiting','1','Done','2','Error','3','Redundent','Unknown')),
+  action_h             as (DECODE(TO_CHAR("ACTION"),NULL,NULL,'1','Create','2','Drop','3','Alter',TO_CHAR(4-TO_NUMBER('Rename')),'Unknown')),
+  object_type_h        as (DECODE(TO_CHAR("OBJECT_TYPE"),NULL,NULL,'1','Table','2','Index','3','Sequence','Unknown')),
+  alter_action_h       as (DECODE(TO_CHAR("ALTER_ACTION"),NULL,NULL,'1','Add','2','Modify','3','Drop','4','Rename','Unknown')),
+  alter_object_type_h  as (DECODE(TO_CHAR("ALTER_OBJECT_TYPE"),NULL,NULL,'1','column','2','constraint','Unknown')),
+  constraint_type_h    as (DECODE(TO_CHAR("CONSTRAINT_TYPE"),NULL,NULL,'1','Primary key','2','Foreign key','3','Not null','4','Check','Unknown'))
+);
+
+
+-- Add comments to the columns 
+comment on column UPGRADE_STEPS.id
+  is 'Primary key. Use sequence UPGRADE_STEPS_SEQ';
+comment on column UPGRADE_STEPS.status
+  is '0 - Waiting, 1 - Done, 2- Error';
+comment on column UPGRADE_STEPS.action
+  is '1 - Create, 2 - Drop, 3 - Alter';
+comment on column UPGRADE_STEPS.object_type
+  is '1 - Table, 2 - Index, 3 - Sequence';
+comment on column UPGRADE_STEPS.alter_action
+  is '1 - Add, 2 - Modify, 3 - Drop';
+comment on column UPGRADE_STEPS.alter_object_type
+  is '1 - column, 2 - constraint';
+comment on column UPGRADE_STEPS.alter_object_name
+  is 'Name for added column / constraint';
+comment on column UPGRADE_STEPS.constraint_type
+  is '1 - Primary key, 2 - Foreign key, 3 - Not null, 4 - Check';
+comment on column UPGRADE_STEPS.table_columns
+  is 'Column list on created / altered table / index';
+-- Create/Recreate primary, unique and foreign key constraints 
+-- alter table UPGRADE_STEPS
+-- add constraint UPGRADE_STEPS_PK primary key (ID)
+-- using index;
+-- Create/Recreate check constraints 
+alter table UPGRADE_STEPS
+  add constraint CHECK_ALTER
+  check (alter_action IS NULL OR (alter_action IS NOT NULL AND alter_object_type IS NOT NULL ));
+  
+CREATE OR REPLACE PUBLIC SYNONYM upgrade_steps FOR upgrade_steps;
+GRANT ALL ON upgrade_steps TO PUBLIC;
+
+CREATE OR REPLACE PUBLIC SYNONYM UPGRADE_STEPS_SEQ FOR UPGRADE_STEPS_SEQ;
+GRANT SELECT ON UPGRADE_STEPS_SEQ TO PUBLIC;

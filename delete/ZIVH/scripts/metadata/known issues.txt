@@ -1,0 +1,7 @@
+known issues :
+
+- no support for view and pl/sql
+- need to add support for sequences(make it smart, by ranges)
+- need to add support for FK changes(new/changed/removed) in diff proc.
+
+

@@ -1,0 +1,42 @@
+
+CREATE OR REPLACE
+TYPE dba_part_type
+AS
+   OBJECT (table_owner VARCHAR2 (40),
+		   table_name VARCHAR2 (30),
+           partition_name VARCHAR2 (30),
+           high_value VARCHAR2(4000),
+           num_rows NUMBER,
+           compression VARCHAR2 (8),
+           last_analyzed DATE,
+		   tablespace_name VARCHAR2 (40),
+		   partition_position number)
+/
+
+CREATE OR REPLACE TYPE dba_part_table AS TABLE OF dba_part_type;
+/
+
+CREATE OR REPLACE FUNCTION return_dba_partitions
+   RETURN dba_part_table
+   PIPELINED
+ AUTHID CURRENT_USER 
+IS
+   r   dba_part_type;
+BEGIN
+   FOR f IN (SELECT   * FROM dba_tab_partitions)
+   LOOP
+      r :=
+     dba_part_type (f.table_owner,
+					f.table_name,
+                    f.partition_name,
+                    f.high_value,
+                    f.num_rows,
+                    f.compression,
+                    f.last_analyzed,
+                    f.tablespace_name,
+					f.partition_position);
+      PIPE ROW (r);
+   END LOOP;
+END;
+/
+

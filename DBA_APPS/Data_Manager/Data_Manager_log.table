@@ -1,0 +1,65 @@
+declare
+  l_is_ee number;
+  l_cmd   varchar2(30000);
+begin
+    
+
+	l_cmd := 'CREATE TABLE DATA_MANAGER_LOG( ' ||
+			  'ID				  NUMBER	     NOT NULL, ' ||
+			  'BUCKET_ID		  NUMBER	     , ' ||
+			  'OPERATION_TIME     TIMESTAMP(6)   NOT NULL, ' ||
+			  'SCHEMA_NAME        VARCHAR2(60), ' ||
+			  'COMPONENT          VARCHAR2(100)  NOT NULL, ' ||
+			  'OPERATION		  VARCHAR2(100)  NOT NULL, ' ||
+			  'SRC_TABLE_NAME	  VARCHAR2(40), ' ||
+			  'DST_TABLE_NAME	  VARCHAR2(40), ' ||
+			  'BUCKET_SIZE		  NUMBER	     , ' ||
+			  'ROWS_PER_MINUTE	  NUMBER	     , ' ||
+			  'TOTAL_TIME_MS      NUMBER		 , ' ||
+			  'SIZE_MB            NUMBER		 , ' ||
+			  'FIELDS_NUMBER      NUMBER		 , ' ||
+			  'INDEXES_NUMBER     NUMBER ';
+			  
+	select count(*) 
+	into   l_is_ee 
+	from dba_tab_partitions
+	where table_name = 'MSG_QUEUE_IN'
+	and rownum <2;
+	
+	if l_is_ee > 0 then
+	  l_cmd := l_cmd || ', ARRIVAL_MONTH		 AS (TO_CHAR(OPERATION_TIME, ''MM''))) ' ||
+					'PARTITION BY RANGE (ARRIVAL_MONTH) ' ||
+					'( PARTITION DM_LOG_JAN_P VALUES LESS THAN (''02''), ' ||
+					  'PARTITION DM_LOG_FEB_P VALUES LESS THAN (''03''), ' ||
+					  'PARTITION DM_LOG_MAR_P VALUES LESS THAN (''04''), ' ||
+					  'PARTITION DM_LOG_APR_P VALUES LESS THAN (''05''), ' ||
+					  'PARTITION DM_LOG_MAY_P VALUES LESS THAN (''06''), ' ||
+					  'PARTITION DM_LOG_JUN_P VALUES LESS THAN (''07''), ' ||
+					  'PARTITION DM_LOG_JUL_P VALUES LESS THAN (''08''), ' ||
+					  'PARTITION DM_LOG_AUG_P VALUES LESS THAN (''09''), ' ||
+					  'PARTITION DM_LOG_SEP_P VALUES LESS THAN (''10''), ' ||
+					  'PARTITION DM_LOG_OCT_P VALUES LESS THAN (''11''), ' ||
+					  'PARTITION DM_LOG_NOV_P VALUES LESS THAN (''12''), ' ||
+					  'PARTITION DM_LOG_DEC_P VALUES LESS THAN (''13'') ' ;
+	end if;
+	
+	l_cmd := l_cmd || ')';
+	dbms_output.put_line (l_cmd);
+	execute immediate (l_cmd);
+	
+--	select 'CREATE INDEX DM_LOG_COMPONENT_IDX ON PARTITION_MANAGER_LOG (COMPONENT, TABLE_NAME) ' || decode(l_is_ee, '1', 'local', ' ')
+--    into l_cmd
+--    from dual;
+     
+--	dbms_output.put_line (l_cmd);
+--	execute immediate (l_cmd);
+	
+	
+end;
+/
+
+
+grant select, insert, delete, update on DATA_MANAGER_LOG to PUBLIC;
+
+create or replace public synonym DATA_MANAGER_LOG  for DATA_MANAGER_LOG ;
+

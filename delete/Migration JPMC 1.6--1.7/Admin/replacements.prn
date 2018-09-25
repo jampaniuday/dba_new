@@ -1,0 +1,12 @@
+PARAMETER                   VAL
+\^sol                       JPMC
+\^conf                      jpmc
+\^pkg                       jpmc
+\^sol                       JPMC
+\^conf                      jpmc
+\^pkg                       jpmc
+\^notif_mailjpmc.qa.notis   @traiana.com
+\^flat_doc                  FlatJPMC
+\^flat_multi_doc            FlatMultiJPMC
+\^domain_id                 1000000
+\^PartnerID                 1000000

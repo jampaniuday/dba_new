@@ -1,0 +1,293 @@
+create or replace package body CONFIND is
+
+  PROCEDURE get_data IS
+
+  emesg VARCHAR2(1000);
+  L_WHAT VARCHAR2(4000);
+
+  BEGIN
+
+
+-- Cleanup the local tables.
+    BEGIN
+
+    DELETE from mapping;
+    delete from ADDRESS_TO_TRANSFORMER;
+    delete from ADDRESS_ROUTE;
+    delete from CONNECTIVITY;
+    DELETE FROM cnfg_instance;
+    commit;
+
+    EXCEPTION
+    WHEN OTHERS THEN
+
+    emesg := SQLERRM;
+    insert into confind_log values('Problem deleting the base tables: '||emesg||'', systimestamp);
+    raise_application_error(-20115, 'Problem deleting the base tables: '||emesg||'');
+
+    END;
+
+
+-- Populate connectivity table
+    BEGIN
+
+        for cur_sys in (SELECT db_schema,db_link,ID,IC_VERSION FROM ACTIVE_APP_LIST WHERE IC_VERSION IS NOT NULL) loop
+            declare
+                l_errm varchar2(2000);
+                l_sqlcode number;
+                l_var VARCHAR2(30);
+
+            BEGIN
+
+                SELECT COUNT(1) INTO l_var  FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CONNECTIVITY' AND IC_VERSION=cur_sys.IC_VERSION;
+
+            IF l_var = 1 THEN
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CONNECTIVITY' AND IC_VERSION = cur_sys.IC_VERSION;
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            ELSE
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CONNECTIVITY' AND IC_VERSION = 'DEFAULT';
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            END IF;
+
+            exception
+                when others THEN
+                    l_errm := SQLERRM;
+                    l_sqlcode := sqlcode;
+                    insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in connectivity - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                    commit;
+            end;
+        end loop;
+    end;
+
+-- Populate ADDRESS_ROUTE table
+    begin
+        for cur_sys IN (SELECT db_schema,db_link,ID,IC_VERSION FROM ACTIVE_APP_LIST WHERE IC_VERSION IS NOT NULL) LOOP
+
+     declare
+                l_errm varchar2(2000);
+                l_sqlcode number;
+                l_var VARCHAR2(30);
+
+            BEGIN
+
+                SELECT COUNT(1) INTO l_var  FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_ROUTE' AND IC_VERSION=cur_sys.IC_VERSION;
+
+            IF l_var = 1 THEN
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_ROUTE' AND IC_VERSION = cur_sys.IC_VERSION;
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            ELSE
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_ROUTE' AND IC_VERSION = 'DEFAULT';
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            END IF;
+
+            exception
+                when others then
+                    l_errm := SQLERRM;
+                    l_sqlcode := sqlcode;
+                    insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in address route - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                    commit;
+            end;
+        end loop;
+    end;
+
+-- Populate ADDRESS_TO_TRANSFORMER table
+    begin
+        for cur_sys IN (SELECT db_schema,db_link,ID,IC_VERSION FROM ACTIVE_APP_LIST WHERE IC_VERSION IS NOT NULL) LOOP
+
+     declare
+                l_errm varchar2(2000);
+                l_sqlcode number;
+                l_var VARCHAR2(30);
+
+            BEGIN
+
+                SELECT COUNT(1) INTO l_var  FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_TO_TRANSFORMER' AND IC_VERSION=cur_sys.IC_VERSION;
+
+            IF l_var = 1 THEN
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_TO_TRANSFORMER' AND IC_VERSION = cur_sys.IC_VERSION;
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            ELSE
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='ADDRESS_TO_TRANSFORMER' AND IC_VERSION = 'DEFAULT';
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            END IF;
+
+
+            exception
+                when others then
+                    l_errm := SQLERRM;
+                    l_sqlcode := sqlcode;
+                    insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in address to transformer - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                    commit;
+            end;
+        end loop;
+    end;
+
+-- Populate MAPPING table
+    begin
+        for cur_sys IN (SELECT db_schema,db_link,ID,IC_VERSION FROM ACTIVE_APP_LIST WHERE IC_VERSION IS NOT NULL) LOOP
+
+     declare
+                l_errm varchar2(2000);
+                l_sqlcode number;
+                l_var VARCHAR2(30);
+
+            BEGIN
+
+                SELECT COUNT(1) INTO l_var  FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='MAPPING' AND IC_VERSION=cur_sys.IC_VERSION;
+
+            IF l_var = 1 THEN
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='MAPPING' AND IC_VERSION = cur_sys.IC_VERSION;
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            ELSE
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='MAPPING' AND IC_VERSION = 'DEFAULT';
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            END IF;
+
+            exception
+                when others then
+                    l_errm := SQLERRM;
+                    l_sqlcode := sqlcode;
+                    insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in MAPPING - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                    commit;
+            end;
+        end loop;
+    end;
+
+
+-- Populate CNFG_INSTANCE table
+    begin
+        for cur_sys IN (SELECT db_schema,db_link,ID,IC_VERSION FROM ACTIVE_APP_LIST WHERE IC_VERSION IS NOT NULL) LOOP
+
+     declare
+                l_errm varchar2(2000);
+                l_sqlcode number;
+                l_var VARCHAR2(30);
+
+            BEGIN
+
+                SELECT COUNT(1) INTO l_var  FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CNFG_INSTANCE' AND IC_VERSION=cur_sys.IC_VERSION;
+
+            IF l_var = 1 THEN
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CNFG_INSTANCE' AND IC_VERSION = cur_sys.IC_VERSION;
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+            ELSE
+
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME ='CNFG_INSTANCE' AND IC_VERSION = 'DEFAULT';
+
+                SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+                SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+                execute immediate L_WHAT;
+
+
+
+            END IF;
+
+            exception
+                when others then
+                    l_errm := SQLERRM;
+                    l_sqlcode := sqlcode;
+                    insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in cnfg_instance - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                    commit;
+            end;
+        end loop;
+    end;
+  END;
+   PROCEDURE post_data IS
+  BEGIN
+    delete from CONFIND_UAT.MAPPING@GS_VIBEPROD;
+    delete from CONFIND_UAT.ADDRESS_TO_TRANSFORMER@GS_VIBEPROD;
+    delete from CONFIND_UAT.ADDRESS_ROUTE@GS_VIBEPROD;
+    delete from CONFIND_UAT.CONNECTIVITY@GS_VIBEPROD;
+    delete from CONFIND_UAT.SYSTEM@GS_VIBEPROD;
+
+
+    insert into CONFIND_UAT.SYSTEM@GS_VIBEPROD (id, environment, application, db_link, db_schema, db_tns, status, sync_interval, last_update, creation_date, ic_version)  (select id, environment, application, db_link, db_schema, NULL, 1, 24, sample_date, SYSDATE, ic_version from ACTIVE_APP_LIST);
+    insert into CONFIND_UAT.CONNECTIVITY@GS_VIBEPROD (id, system, address_id, address_name, direction, update_time, connectivity_type, adapter, queue_name, queue_mgr, channel, server, port, user_name, email, directory, fix_connection_type, sender_comp_id, target_comp_id, address_status, address_server_name, channels_count, enabled_channels, additional_info) (select id, system, address_id, address_name, direction, update_time, connectivity_type, adapter, queue_name, queue_mgr, channel, server, port, user_name, email, directory, fix_connection_type, sender_comp_id, target_comp_id, address_status, address_server_name, channels_count, enabled_channels, additional_info from CONNECTIVITY);
+    insert into CONFIND_UAT.ADDRESS_ROUTE@GS_VIBEPROD (id, system, sourceaddress_id, destinationaddress_id) (select id, system, sourceaddress_id, destinationaddress_id from ADDRESS_ROUTE);
+    insert into CONFIND_UAT.ADDRESS_TO_TRANSFORMER@GS_VIBEPROD (id, system, connectivity_id, transformer_order, transformer_id, transformer_name, parameters,status) (select id, system, connectivity_id, transformer_order, transformer_id, transformer_name, parameters,status from ADDRESS_TO_TRANSFORMER);
+        INSERT INTO CONFIND_UAT.MAPPING@GS_VIBEPROD (id, connectivity_id, status, priority, source_tp, source_cp, source_pb, source_ecn, source_tp_account, source_product, dest_id, dest_tp, dest_cp, dest_pb, dest_ecn, dest_tp_account, description, source_trade_type, dest_trade_type, dest_tp_trader, dest_tp_region, tp_concat) (SELECT id, connectivity_id, status, priority, source_tp, source_cp, source_pb, source_ecn, source_tp_account, source_product, dest_id, dest_tp, dest_cp, dest_pb, dest_ecn, dest_tp_account, description, source_trade_type, dest_trade_type, dest_tp_trader, dest_tp_region, tp_concat FROM MAPPING);
+    commit;
+  END;
+end CONFIND;

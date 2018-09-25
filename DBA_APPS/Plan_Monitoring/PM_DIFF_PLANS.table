@@ -1,0 +1,22 @@
+create table PM_DIFF_PLANS
+(
+  SCHEMA_NAME        varchar2(30) not null,
+  SQL_ID             varchar2(13) not null,
+  PLAN_HASH_VALUE    number       not null,
+  SQL_FULLTEXT       clob         not null,
+  EXECUTIONS         number       not null,
+  AVG_ELA_TIME_SEC   number(10,3) not null,  
+  AVG_ROWS_PROCESSED number       not null,
+  AVG_BUFFER_GETS    number       not null,
+  AVG_DISK_READS     number       not null,
+  MODULE             varchar2(64),
+  ACTION             varchar2(64),
+  INSERT_TIME        date         not null,
+  STATS_START_TIME   date         not null,
+  STATS_END_TIME     date         not null,
+  constraint PM_DIFF_PLANS_PK primary key  (SCHEMA_NAME, 
+                                            SQL_ID, 
+                                            PLAN_HASH_VALUE,
+                                            STATS_END_TIME)
+)
+/

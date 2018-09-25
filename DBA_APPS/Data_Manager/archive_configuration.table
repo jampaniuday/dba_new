@@ -1,0 +1,23 @@
+CREATE TABLE archive_configuration 
+(
+  SCHEMA				 VARCHAR2(30)          NOT NULL,
+  KEY_NAME               VARCHAR2(100)         NOT NULL,
+  KEY_VALUE              VARCHAR2(100)         ,
+  LAST_SAVED_TIME        TIMESTAMP(6)          default sysTIMESTAMP NOT NULL
+);
+
+ALTER TABLE archive_configuration ADD (
+  CONSTRAINT archive_configuration_UNQ
+  UNIQUE (SCHEMA, KEY_NAME)
+  USING INDEX
+  ENABLE VALIDATE);
+  
+insert into archive_configuration (SCHEMA, KEY_NAME, KEY_VALUE, LAST_SAVED_TIME) values ('PUBLIC', 'max_parallel', '2', sysTIMESTAMP);
+insert into archive_configuration (SCHEMA, KEY_NAME, KEY_VALUE, LAST_SAVED_TIME) values ('PUBLIC', 'sleep_sec', '60', sysTIMESTAMP);
+insert into archive_configuration (SCHEMA, KEY_NAME, KEY_VALUE, LAST_SAVED_TIME) values ('PUBLIC', 'total_run_time', null, sysTIMESTAMP);
+
+commit;
+			
+grant select, insert, update, delete on archive_configuration to public;		
+
+create or replace public synonym archive_configuration for archive_configuration;

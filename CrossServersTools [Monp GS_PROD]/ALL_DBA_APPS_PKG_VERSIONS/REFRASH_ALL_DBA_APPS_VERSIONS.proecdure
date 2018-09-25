@@ -1,0 +1,34 @@
+CREATE OR REPLACE procedure refrash_all_dba_apps_versions
+IS
+
+l_sql_stmt varchar2(4000);
+
+begin
+
+delete all_dba_apps_pkg_versions;
+commit;
+
+FOR i IN (SELECT db_link FROM user_db_links where db_link like '%PROD%' or db_link in '%UAT%') LOOP
+
+
+l_sql_stmt := 'insert into all_dba_apps_pkg_versions  (DB_LINK, STATUS, SCHEMA_BASE_VERSION, DATA_MANAGER, CMN_DB_UTILS_PKG, GATHER_STATISTICS, PARTITION_MANAGER, SAFE_UPGRADE)
+(select '''||i.db_link||''',''valid'',a.* from dba_apps_versions@' ||i.DB_LINK|| ' a)';
+
+begin
+
+--DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+EXECUTE IMMEDIATE l_sql_stmt;
+
+commit;
+EXCEPTION
+   WHEN OTHERS THEN
+   l_sql_stmt := 'insert into all_dba_apps_pkg_versions (db_link,status) (select '''||i.db_link||''',''Not exists'' from dual)';
+   EXECUTE IMMEDIATE l_sql_stmt;
+   --DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+   commit;
+
+end;
+
+END LOOP; 
+END;
+/

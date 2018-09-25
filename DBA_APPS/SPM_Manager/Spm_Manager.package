@@ -1,0 +1,126 @@
+-- before using this package, run the following command via sys:
+-- GRANT ADMINISTER SQL MANAGEMENT OBJECT to dba_apps;
+
+create or replace package spm_manager AS
+
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'Spm_Manager';
+  VERSION       CONSTANT VARCHAR2(30) := '1.1';
+  
+  function FUNC_VERSION return VARCHAR2;
+
+  function get_key_value (P_key_Name           in varchar2)
+                               return varchar2;
+							   
+  PROCEDURE load_sqls;
+
+  PROCEDURE evolve_plans;
+  
+end spm_manager;
+/
+
+  
+CREATE OR REPLACE package body spm_manager as
+
+   v_module_name       VARCHAR2 (100) := 'Spm_Manager';  
+  
+	FUNCTION FUNC_VERSION return VARCHAR2
+	is
+	begin
+	return VERSION;
+	end FUNC_VERSION;
+	
+  function get_key_value (P_key_Name           in varchar2)
+                               return varchar2
+  IS
+    l_key_value               SPM_Manager_config.KEY_VALUE%type;
+  BEGIN
+    select key_value
+      into l_key_value
+      from SPM_Manager_config
+     where upper(key_Name) = upper(P_key_Name);
+     
+     return l_key_value;
+  EXCEPTION
+    WHEN OTHERS THEN
+       return null;
+  END get_key_value;
+  
+  ------------------------------
+  PROCEDURE load_sqls is
+	v_sql_plan_id  pls_integer;
+  begin
+	DBMS_APPLICATION_INFO.set_module  (v_module_name, 'load_sqls');
+  
+    for I IN (
+    select distinct sql_id
+	-- , child_number, sql_text, elapsed_time, executions, parsing_schema_name,module
+    from 
+       (select sql_id, 
+             rank () over (order by sum(elapsed_time) desc) as sql_rank
+        from v$sql
+        where 
+           upper(trim(sql_text)) not like 'BEGIN%'
+           and upper(sql_text) not like '%BEGIN %'
+           and upper(sql_text) not like '%DECLARE %'
+           and parsing_schema_name not in ('SYS', 'SYSTEM', 'SYSMAN', 'MDSYS')
+            and sql_id <> '730n33n8tggtd'
+        group by sql_id
+        having sum(executions) > nvl(get_key_value('min_execs'), 100)
+          and  sum(elapsed_time) > nvl(get_key_value('min_elapsed'), 100000)
+        )
+    where sql_rank < nvl(get_key_value('top_sqls'), 1000)) loop
+	   
+      v_sql_plan_id := dbms_spm.load_plans_from_cursor_cache( sql_id => i.sql_id);
+	  
+    end loop;
+
+  end load_sqls;
+  
+  
+  ------------------------------
+  PROCEDURE evolve_plans is
+	v_evolve_sql_plan  clob;
+	l_curr_day  number(1);
+	l_curr_hour number(2);
+  begin
+	DBMS_APPLICATION_INFO.set_module  (v_module_name, 'evolve_plans');
+
+	select to_char(sysdate,'D'), to_char(sysdate,'HH24')
+	  into l_curr_day,			 l_curr_hour
+	from dual;  
+	
+	-- evolve will run Monday - Friday and after 9:00AM
+	if l_curr_day not in ('1', '7') and l_curr_hour >= 9 then
+		FOR I IN (
+			select * 
+			from   dba_sql_plan_baselines
+			where enabled = 'YES' 
+			  and accepted <> 'YES'
+			  -- parameter
+			  and nvl(last_verified, sysdate-999) < sysdate-nvl(get_key_value('retry_evolve'), 180)) 
+		LOOP
+		  v_evolve_sql_plan :=    dbms_spm.evolve_sql_plan_baseline(
+											sql_handle => i.sql_handle,
+											plan_name => i.plan_name); 
+		end loop;
+	end if;
+	
+  end evolve_plans;
+  
+end spm_manager;
+/
+
+
+begin
+  delete VERSIONS
+  where  COMPONENT_NAME = spm_manager.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+                       UPDATE_TIME)
+              values (spm_manager.C_APP_NAME,
+                      spm_manager.VERSION,
+                      SYSDATE);
+  commit;
+end;
+/

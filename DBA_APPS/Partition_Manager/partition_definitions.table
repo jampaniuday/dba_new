@@ -1,0 +1,53 @@
+CREATE TABLE partition_definitions 
+(
+OWNER VARCHAR2(30) not NULL,
+TABLE_NAME VARCHAR2(30) not NULL ,
+RETENTION number(30) not null,
+DAYS_AHEAD number(30) not null,
+ORDER_IN_PROCESS number(10) not null,
+PARTITION_TABLESPACE_NAME VARCHAR2(30) DEFAULT 'USERS' NOT NULL,
+STATUS NUMBER(1) DEFAULT 0 NOT NULL,
+VALIDATION		VARCHAR2(4000),
+PERIOD_SIZE		NUMBER(10),
+DATE_FORMAT		VARCHAR2(40),
+CRON_EXPR		VARCHAR2(40),
+GROWTH_FACTOR	NUMBER 		DEFAULT 0.95 NOT NULL,
+PART_PREFIX		VARCHAR2(10),
+keep_in_cache varchar2(1) default 'N',
+ind_keep_in_cache varchar2(1) default 'N',
+upd_global_ind varchar2(1) default 'Y',
+drop_partition_only_if_empty   varchar2(1) default 'N'
+);
+
+comment on column partition_definitions.TABLE_NAME is 'source table name';
+comment on column partition_definitions.RETENTION is 'Days to keep in table';
+comment on column partition_definitions.DAYS_AHEAD is 'Days to prepare ahead (relevent only for partitioned tables)';
+comment on column partition_definitions.PARTITION_TABLESPACE_NAME is 'Tablespace for newly created partitions (relevent only for partitioned tables)';
+comment on column partition_definitions.ORDER_IN_PROCESS is 'table order in archive processes per owner';
+comment on column partition_definitions.STATUS is '1 - active, 0 - inactive';
+comment on column partition_definitions.VALIDATION is 'condition for drop partitions';
+comment on column partition_definitions.PERIOD_SIZE is 'partition period size';
+comment on column partition_definitions.DATE_FORMAT is 'partition name date format';
+comment on column partition_definitions.CRON_EXPR is 'crontab';
+comment on column partition_definitions.GROWTH_FACTOR is 'next partition size';
+comment on column partition_definitions.PART_PREFIX is 'partition prefix';
+comment on column partition_definitions.upd_global_ind is 'update global indexes when dropping partitions';
+
+
+
+CREATE UNIQUE INDEX PD_OWNER_TABLE_UK ON partition_definitions(OWNER,TABLE_NAME);
+CREATE UNIQUE INDEX PD_OWNER_ORDER_UK ON partition_definitions(OWNER,ORDER_IN_PROCESS);
+
+
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_STATUS CHECK (STATUS IN(0,1));
+
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_retention CHECK (retention >=1);
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_days_ahead CHECK (days_ahead >=-1);
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_PERIOD_SIZE CHECK (1440/PERIOD_SIZE = trunc(1440/PERIOD_SIZE, 5));
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_GROWTH_FACTOR CHECK (GROWTH_FACTOR >0 and GROWTH_FACTOR <=1);
+
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_KEEP1 CHECK (keep_in_cache IN('Y','N'));
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_KEEP2 CHECK (ind_keep_in_cache IN('Y','N'));
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_update_global CHECK (upd_global_ind IN('Y','N'));
+ALTER TABLE partition_definitions ADD CONSTRAINT PD_CHK_drop_only_empty CHECK (drop_partition_only_if_empty IN('Y','N'));
+

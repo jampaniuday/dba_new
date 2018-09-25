@@ -1,0 +1,192 @@
+create or replace package Indexes_Rebuilder AUTHID CURRENT_USER AS
+  
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'Indexes_Rebuilder';
+  VERSION       CONSTANT VARCHAR2(30) := '1.4'; 
+  
+  -- The procedure finds indexis that should be rebuilt.
+  procedure Find_Bad_Indexes(P_Schema         in varchar2 default user,
+                             P_Size_MB        in number   default 500,
+                             P_Height         in number   default 5,
+                             P_Pct_Deleted    in number   default 25,
+                             P_Time_Limit_Min in number   default 120);
+
+  -- The procedure rebuilds indexes.
+  procedure Rebuild_Indexes(P_Schema in varchar2       default user,
+                            P_Index  in varchar2       default 'XXX',
+                            P_Time_Limit_Min in number default 120);
+
+end Indexes_Rebuilder;
+/
+
+
+
+
+
+
+create or replace package body Indexes_Rebuilder as
+
+  v_errm          varchar2(200);
+
+
+
+  procedure Find_Bad_Indexes(P_Schema         in varchar2 default user,
+                             P_Size_MB        in number   default 500,
+                             P_Height         in number   default 5,
+                             P_Pct_Deleted    in number   default 25,
+                             P_Time_Limit_Min in number   default 120) is
+
+    C_APP_NAME   CONSTANT VARCHAR2(90) := 'Indexes_Rebuilder.Find_Bad_Indexes';
+    C_START_TIME CONSTANT DATE         := SYSDATE;
+
+    Timeout_Exp  exception;
+
+    Index_Name    varchar2(30);
+    V_Pct_Deleted number;
+
+  begin
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_Start, NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'PARAMETERS - Schema(' || P_Schema || ') Size MB(' || P_Size_MB || ') Height(' || P_Height || ') Pct Deleted(' || P_Pct_Deleted || ') Time Limit Min(' || P_Time_Limit_Min || ')', null, Log_Manager.Msg_Type_Info); 
+    
+    -- Calculating the percentage of empty (deleted) space of the required indexes in the schema.
+    for Index_Rec in (select                 INDEX_NAME,
+                             BLEVEL + 1      HEIGHT,
+                             BYTES/1024/1024 SIZE_MB 
+                      from   ALL_INDEXES I,
+                             DBA_SEGMENTS S
+                      where  I.OWNER = P_Schema
+                        and  I.OWNER = S.OWNER
+                        and  I.INDEX_NAME = S.SEGMENT_NAME
+                        and  (S.BYTES/1024/1024 >= P_Size_MB or BLEVEL + 1 >= P_Height)) loop
+		begin
+            Index_Name := Index_Rec.INDEX_NAME;
+            
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Analyzing '||P_Schema||'.'||Index_Rec.INDEX_NAME, NULL, Log_Manager.Msg_Type_Info);
+			execute immediate 'analyze index '||P_Schema||'.'||Index_Rec.INDEX_NAME||' validate structure';
+    
+            -- If the percentage of empty (deleted) space in the index is higher than what specified by P_PCT_DELETED, the index is marked as needed to be fixed.
+			select Round(DEL_LF_ROWS*100/Decode(LF_ROWS, 0, 1, LF_ROWS))
+            into   V_Pct_Deleted
+            from   INDEX_STATS;
+
+            if V_Pct_Deleted >= P_Pct_Deleted then
+				insert into IR_INDEXES_TO_FIX (OWNER,
+											   NAME,
+											   HEIGHT,
+											   SIZE_MB,
+											   PCT_DELETED,
+											   CHECK_TIME,
+											   IS_FIXED) select P_Schema,
+																Index_Rec.INDEX_NAME,
+																Index_Rec.HEIGHT,
+																Index_Rec.SIZE_MB,
+																Round(DEL_LF_ROWS*100/Decode(LF_ROWS, 0, 1, LF_ROWS)) PCT_DELETED,
+																SYSDATE,
+																0 
+														 from   INDEX_STATS;
+
+				commit;
+            end if;
+
+            -- Checking if timeout occurred.      
+            if (C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE) then
+                raise Timeout_Exp;
+            end if;
+		exception
+            when Timeout_Exp then
+				raise Timeout_Exp;
+			when OTHERS then
+                v_errm := SUBSTR(SQLERRM, 1 , 200);
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'ERROR - Check IR_SKIPPED_INDEXES table.', NULL, Log_Manager.Msg_Type_Error);
+				insert into IR_SKIPPED_INDEXES(OWNER, NAME, ERROR_TIME, ERROR) values (P_Schema, Index_Name, SYSDATE, v_errm);
+		end;
+	end loop;
+  end Find_Bad_Indexes;
+
+
+
+
+
+  procedure Rebuild_Indexes(P_Schema in varchar2       default user,
+                            P_Index  in varchar2       default 'XXX',
+                            P_Time_Limit_Min in number default 120) is
+
+    C_APP_NAME   CONSTANT VARCHAR2(90) := 'Indexes_Rebuilder.Rebuild_Indexes';
+    C_START_TIME CONSTANT DATE         := SYSDATE;
+
+    Timeout_Exp  exception;
+
+    Index_Name varchar2(30);
+
+  begin
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_Start, NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'PARAMETERS - Schema(' || P_Schema || ') P_index(' || P_Index || ')', null, Log_Manager.Msg_Type_Info); 
+    
+    -- Rebuilding needed indexes.
+	for Index_To_Rebuild in (select distinct NAME
+						     from   IR_INDEXES_TO_FIX
+						     where  OWNER = P_Schema
+                               and  (NAME = P_index or P_Index = 'XXX')
+                               and  IS_FIXED = 0) loop
+			begin
+				Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Rebuilding '||P_Schema||'.'||Index_To_Rebuild.NAME, NULL, Log_Manager.Msg_Type_Info);
+				Index_Name := Index_To_Rebuild.NAME;
+                execute immediate 'alter index '||P_Schema||'.'||Index_To_Rebuild.NAME||' rebuild';
+
+                update IR_INDEXES_TO_FIX
+                set    IS_FIXED = 1,
+                       FIX_TIME = SYSDATE
+                where  OWNER = P_Schema
+                  and  NAME = Index_To_Rebuild.NAME
+                  and  IS_FIXED = 0;
+
+                commit;
+
+				-- Checking if timeout occurred.      
+				if (C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE) then
+					raise Timeout_Exp;
+				end if;
+			exception
+                when Timeout_Exp then
+					raise Timeout_Exp;
+				when OTHERS then
+					v_errm := SUBSTR(SQLERRM, 1 , 200);
+					Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'ERROR - Check IR_SKIPPED_INDEXES table.', NULL, Log_Manager.Msg_Type_Error);
+					insert into IR_SKIPPED_INDEXES(OWNER, NAME, ERROR_TIME, ERROR) values (P_Schema, Index_Name, SYSDATE, v_errm);
+			end;
+	end loop;
+  end Rebuild_Indexes;
+end Indexes_Rebuilder;
+/
+
+
+
+
+
+
+
+
+
+grant execute on Indexes_Rebuilder to PUBLIC
+/
+
+begin
+  execute immediate 'create public synonym INDEXES_REBUILDER for Indexes_Rebuilder';
+exception
+  when OTHERS then
+    NULL;
+end;
+/
+
+begin
+  delete VERSIONS
+  where  COMPONENT_NAME = Indexes_Rebuilder.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values (Indexes_Rebuilder.C_APP_NAME,
+			          Indexes_Rebuilder.VERSION,
+					  SYSDATE);
+  commit;
+end;
+/

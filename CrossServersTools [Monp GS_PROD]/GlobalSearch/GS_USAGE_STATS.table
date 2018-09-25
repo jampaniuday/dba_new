@@ -1,0 +1,15 @@
+CREATE TABLE GS_USAGE_STATS
+(
+  DATE_HOURLY     DATE,
+  NUM_OF_SEARCHS  NUMBER                        NOT NULL,
+  SEARCH_STRINGS  CLOB
+);
+
+
+--  There is no statement for index GS_PROD.SYS_C001765479.
+--  The object is created when the parent object is created.
+
+ALTER TABLE GS_USAGE_STATS ADD (
+  PRIMARY KEY
+  (DATE_HOURLY)
+  ENABLE VALIDATE);

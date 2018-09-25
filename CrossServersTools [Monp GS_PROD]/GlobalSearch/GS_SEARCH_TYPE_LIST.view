@@ -1,0 +1,38 @@
+CREATE OR REPLACE FORCE VIEW GS_SEARCH_TYPE_LIST (
+   ID,
+   DESCRIPTION,
+   DB_SCHEMA,
+   DB_LINK,
+   TABLE_NAME,
+   TABLE_DESCRIPTION,
+   RESULT_VIEW,
+   RETURN_ROW_LIMIT,
+   EXECUTION_ORDER,
+   COLUMN_NAME,
+   DATA_TYPE
+)
+AS
+     SELECT   st.id,
+              st.DESCRIPTION,
+              a.DB_SCHEMA,
+              a.DB_LINK,
+              t.TABLE_NAME,
+              t.DESCRIPTION,
+              t.RESULT_VIEW,
+              t.RETURN_ROW_LIMIT,
+              std.EXECUTION_ORDER,
+              sc.column_name,
+              sc.DATA_TYPE
+       FROM   ACTIVE_APP_LIST a,
+              GS_SEARCH_COLUMNS sc,
+              GS_SEARCH_TYPE st,
+              GS_SEARCH_TYPES_DET std,
+              GS_TABLES t
+      WHERE       a.id = std.system_id
+              AND std.type_id = st.ID
+              AND sc.table_id = t.ID
+              AND std.column_id = sc.ID
+   ORDER BY   1,
+              8,
+              3,
+              4;

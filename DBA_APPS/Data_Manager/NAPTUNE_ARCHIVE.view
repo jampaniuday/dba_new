@@ -1,0 +1,57 @@
+CREATE OR REPLACE FORCE VIEW NAPTUNE_ARCHIVE
+(
+   TABLE_OWNER,
+   TABLE_NAME,
+   PARTITION_NAME,
+   NEPTUNE_GROUP_ID,
+   VIEW_NAME,
+   view_condition
+)
+AS
+   SELECT aad.owner table_owner,
+          table_name,
+          '' partition_name,
+          aang.NEPTUNE_GROUP_ID,
+          aang.view_name,
+          '' view_condition
+     FROM all_archive_definitions aad,
+              ALL_ARCHIVE_NEPTUNE_GROUPS aang
+    WHERE partitioned = 0 AND UPPER (dest_table_name) = 'NEPTUNE'
+         and status = 1
+         and aad.NEPTUNE_GROUP_ID = aang.NEPTUNE_GROUP_ID
+         and aad.owner = aang.owner
+   UNION
+   SELECT table_owner,
+          rdp.table_name,
+          partition_name,
+          aang.NEPTUNE_GROUP_ID,
+          aang.view_name,
+          prt_key.column_name || ' < to_date(''' || max(SUBSTR (high_value, INSTR (high_value, '''') + 2, 19)) over (partition by table_owner, rdp.table_name) || ''', ''YYYY-MM-DD HH24:MI:SS'')'  view_condition
+     FROM TABLE (return_dba_partitions) rdp,
+          (SELECT owner, table_name, retention, NEPTUNE_GROUP_ID
+             FROM all_archive_definitions
+            WHERE partitioned = 1  and status = 1 
+                AND UPPER (dest_table_name) = 'NEPTUNE') tr_part_tables,
+            dba_part_key_columns prt_key,
+            ALL_ARCHIVE_NEPTUNE_GROUPS aang
+    WHERE  tr_part_tables.NEPTUNE_GROUP_ID = aang.NEPTUNE_GROUP_ID
+           and tr_part_tables.owner = aang.owner
+           AND rdp.partition_name <> 'P_NEW'
+          AND (rdp.high_value LIKE '%TIME%' OR rdp.high_value LIKE '%DATE%')
+          AND rdp.table_owner = tr_part_tables.owner
+          AND rdp.table_name = tr_part_tables.table_name
+          AND   SYSDATE
+              - TO_DATE (
+                   SUBSTR (high_value, INSTR (high_value, '''') + 2, 19),
+                   'YYYY-MM-DD HH24:MI:SS') > tr_part_tables.retention
+          AND prt_key.owner = tr_part_tables.owner
+          AND prt_key.name = tr_part_tables.table_name
+          AND prt_key.object_type = 'TABLE';
+
+
+CREATE OR REPLACE PUBLIC SYNONYM NAPTUNE_ARCHIVE FOR NAPTUNE_ARCHIVE;
+
+
+GRANT SELECT ON NAPTUNE_ARCHIVE TO PUBLIC;
+
+

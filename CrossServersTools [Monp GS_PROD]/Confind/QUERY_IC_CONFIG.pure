@@ -1,0 +1,461 @@
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', '1.2.4.1.3', 'insert into MAPPING (id, 
+                                                                          connectivity_id, 
+                                                                          status, 
+                                                                          priority, 
+                                                                          source_tp, 
+                                                                          source_cp, 
+                                                                          source_pb, 
+                                                                          source_ecn, 
+                                                                          source_tp_account, 
+                                                                          source_product, 
+                                                                          dest_id, 
+                                                                          dest_tp, 
+                                                                          dest_cp, 
+                                                                          dest_pb, 
+                                                                          dest_ecn, 
+                                                                          dest_tp_account, 
+                                                                          description, 
+                                                                          source_trade_type, 
+                                                                          dest_trade_type, 
+                                                                          dest_tp_trader, 
+                                                                          dest_tp_region, 
+                                                                          tp_concat)                     
+                                                    (select MAPPING_SEQ.nextval, 
+                                                            c1.id,
+                                                            status,
+                                                            priority,
+                                                            s_tp,
+                                                            s_cp,
+                                                            s_pb,
+                                                            s_ecn,
+                                                            NULL,
+                                                            s_product,
+                                                            d_id,
+                                                            d_tp,
+                                                            d_cp,
+                                                            d_pb,
+                                                            d_ecn,
+                                                            NULL,
+                                                            description,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL 
+                                                    from L_VAR_SCHEMA.IC_SERVICE_MAPPING@L_VAR_DBLINK  t, 
+                                                         CONNECTIVITY c1 
+                                                    where  c1.address_id = t.s_id and 
+                                                           c1.system = L_VAR_ID)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('CONNECTIVITY', 'DEFAULT', 'insert into connectivity (id,system,address_id,address_name,direction,update_time,connectivity_type,adapter, queue_name, queue_mgr,channel, 
+                                                                             server, 
+                                                                             port, 
+                                                                             user_name, 
+                                                                             email, 
+                                                                             directory, 
+                                                                             address_status, 
+                                                                             address_server_name, 
+                                                                             channels_count, 
+                                                                             enabled_channels, 
+                                                                             additional_info,
+                                                                             start_date, 
+                                                                             end_date) 
+                                                    (select CONNECTIVITY_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             T.ADDRESS_ID, 
+                                                             ADDRESS_NAME, 
+                                                             T.DIRECTION, 
+                                                             UPDATE_TIME, 
+                                                             T3.protocol CONNECTIVITY_TYPE, 
+                                                             ADAPTER, 
+                                                             QUEUE_NAME, 
+                                                             QUEUE_MGR, 
+                                                             CHANNEL, 
+                                                             SERVER, 
+                                                             PORT, 
+                                                             USERNAME, 
+                                                             EMAIL, 
+                                                             DIRECTORY, 
+                                                             ADDRESS_STATUS, 
+                                                             ADDRESS_SERVER_NAME, 
+                                                             CHANNELS_COUNT, 
+                                                             ENABLED_CHANNELS, 
+                                                             ADDITIONAL_INFO, 
+                                                             NULL start_date, 
+                                                             NULL end_date 
+                                                   from L_VAR_SCHEMA.v_connectivities@L_VAR_DBLINK T,L_VAR_SCHEMA.SD_ADDRESS_SCHEDULER@L_VAR_DBLINK T2,L_VAR_SCHEMA.SD_ADDRESS@L_VAR_DBLINK T3
+                                                   where T.ADDRESS_ID = T2.ADDRESS_ID(+)
+                                                   and T.ADDRESS_ID = T3.ID )', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', '1.2.0.0.9', 'insert into MAPPING (id, 
+                                                                          connectivity_id, 
+                                                                          status, 
+                                                                          priority, 
+                                                                          source_tp, 
+                                                                          source_cp, 
+                                                                          source_pb, 
+                                                                          source_ecn, 
+                                                                          source_tp_account, 
+                                                                          source_product, 
+                                                                          dest_id, 
+                                                                          dest_tp, 
+                                                                          dest_cp, 
+                                                                          dest_pb, 
+                                                                          dest_ecn, 
+                                                                          dest_tp_account, 
+                                                                          description, 
+                                                                          source_trade_type, 
+                                                                          dest_trade_type, 
+                                                                          dest_tp_trader, 
+                                                                          dest_tp_region, 
+                                                                          tp_concat)                     
+                                                    (select MAPPING_SEQ.nextval, 
+                                                            c1.id,
+                                                            status,
+                                                            priority,
+                                                            s_tp,
+                                                            s_cp,
+                                                            s_pb,
+                                                            s_ecn,
+                                                            NULL,
+                                                            NULL,
+                                                            d_id,
+                                                            d_tp,
+                                                            d_cp,
+                                                            d_pb,
+                                                            d_ecn,
+                                                            NULL,
+                                                            description,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL 
+                                                    from L_VAR_SCHEMA.IC_SERVICE_MAPPING@L_VAR_DBLINK  t, 
+                                                         CONNECTIVITY c1 
+                                                    where  c1.address_id = t.s_id and 
+                                                           c1.system = L_VAR_ID)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADDRESS_TO_TRANSFORMER', '1.1.9.11.8', 'insert into ADDRESS_TO_TRANSFORMER (id,  system, connectivity_id, transformer_order, transformer_id, transformer_name) 
+                                                     (select ADDRESS_TO_TRANSFORMER_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             c1.id, 
+                                                             TRANSFORM_ORDER, 
+                                                             TRANSFORMER_ID, 
+                                                             trns.description
+                                                     from L_VAR_SCHEMA.SD_ADDRESS_2_TRANSFORMER@L_VAR_DBLINK  t, 
+                                                           CONNECTIVITY c1,  
+                                                           L_VAR_SCHEMA.IC_CNFG_TRANSFORMERS@L_VAR_DBLINK  trns 
+                                                     where  c1.address_id = t.address_id and 
+                                                            c1.system = L_VAR_ID  and 
+                                                            t.transformer_id = trns.id)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('CONNECTIVITY', '1.2.4.0.4', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', '1.1.9.11.8', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', '1.1.9.3.2', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADDRESS_ROUTE', 'DEFAULT', 'insert into ADDRESS_ROUTE(id, system, sourceaddress_id, destinationaddress_id) 
+                                                     (select ADDRESS_ROUTE_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             c1.id, 
+                                                             c2.id 
+                                                      from L_VAR_SCHEMA.SD_ADDRESS_ROUTE@L_VAR_DBLINK  t 
+                                                      inner join CONNECTIVITY c1 on (c1.address_id = t.source_address_id and c1.system = L_VAR_ID) 
+                                                      inner join CONNECTIVITY c2 on (c2.address_id = t.destination_address_id and c2.system = L_VAR_ID))', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADDRESS_TO_TRANSFORMER', 'DEFAULT', 'insert into ADDRESS_TO_TRANSFORMER (id,  system, connectivity_id, transformer_order, transformer_id, transformer_name, PARAMETERS,status) 
+                                                     (select ADDRESS_TO_TRANSFORMER_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             c1.id, 
+                                                             TRANSFORM_ORDER, 
+                                                             TRANSFORMER_ID, 
+                                                             trns.description, 
+                                                             t.PARAMETERS, 
+                                                             t.status 
+                                                     from L_VAR_SCHEMA.SD_ADDRESS_2_TRANSFORMER@L_VAR_DBLINK  t, 
+                                                           CONNECTIVITY c1,  
+                                                           L_VAR_SCHEMA.IC_CNFG_TRANSFORMERS@L_VAR_DBLINK  trns 
+                                                     where  c1.address_id = t.address_id and 
+                                                            c1.system = L_VAR_ID  and 
+                                                            t.transformer_id = trns.id)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', 'DEFAULT', 'insert into MAPPING (id, 
+                                                                          connectivity_id, 
+                                                                          status, 
+                                                                          priority, 
+                                                                          source_tp, 
+                                                                          source_cp, 
+                                                                          source_pb, 
+                                                                          source_ecn, 
+                                                                          source_tp_account, 
+                                                                          source_product, 
+                                                                          dest_id, 
+                                                                          dest_tp, 
+                                                                          dest_cp, 
+                                                                          dest_pb, 
+                                                                          dest_ecn, 
+                                                                          dest_tp_account, 
+                                                                          description, 
+                                                                          source_trade_type, 
+                                                                          dest_trade_type, 
+                                                                          dest_tp_trader, 
+                                                                          dest_tp_region, 
+                                                                          tp_concat)                     
+                                                    (select MAPPING_SEQ.nextval, 
+                                                            c1.id,
+                                                            status,
+                                                            priority,
+                                                            s_tp,
+                                                            s_cp,
+                                                            s_pb,
+                                                            s_ecn,
+                                                            s_tp_account,
+                                                            s_product,
+                                                            d_id,
+                                                            d_tp,
+                                                            d_cp,
+                                                            d_pb,
+                                                            d_ecn,
+                                                            d_tp_account,
+                                                            description,
+                                                            s_trade_type,
+                                                            d_trade_type,
+                                                            d_tp_trader,
+                                                            d_tp_region,
+                                                            tp_concat  
+                                                    from L_VAR_SCHEMA.IC_SERVICE_MAPPING@L_VAR_DBLINK  t, 
+                                                         CONNECTIVITY c1 
+                                                    where  c1.address_id = t.s_id and 
+                                                           c1.system = L_VAR_ID)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('CNFG_INSTANCE', 'DEFAULT', 'insert into CNFG_INSTANCE (id,system,name,type, version, host_app_version, node_id, status, trace_level, broker_interval, task_processor_count, task_interval, last_start_time, last_alive_time, lock_release_timeout, instance_update_interval, 
+                                                                                ip, 
+                                                                                os, 
+                                                                                vm, 
+                                                                                java, 
+                                                                                db_driver_name, 
+                                                                                db_driver_version, 
+                                                                                db_schema, 
+                                                                                home_dir, 
+                                                                                pack_size, 
+                                                                                jmx_enable, 
+                                                                                jmx_rmi, 
+                                                                                jndi_rmi,
+                                                                                instance_id) 
+                                                      (select CNFG_INSTANCE_SEQ.nextval,
+                                                              L_VAR_ID,
+                                                              name, 
+                                                              type, 
+                                                              version, 
+                                                              host_app_version, 
+                                                              node_id, 
+                                                              status, 
+                                                              trace_level, 
+                                                              broker_interval, 
+                                                              task_processor_count, 
+                                                              task_interval, 
+                                                              last_start_time, 
+                                                              last_alive_time, 
+                                                              lock_release_timeout, 
+                                                              instance_update_interval, 
+                                                              ip, 
+                                                              os, 
+                                                              vm, 
+                                                              java, 
+                                                              db_driver_name, 
+                                                              db_driver_version, 
+                                                              db_schema, 
+                                                              home_dir, 
+                                                              pack_size, 
+                                                              jmx_enable, 
+                                                              jmx_rmi, 
+                                                              jndi_rmi,
+                                                              id  
+                                                      from L_VAR_SCHEMA.IC_CNFG_INSTANCE@L_VAR_DBLINK  
+                                                      where id <> 0)', 1, 0);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', '1.2.4.0.4', 'insert into MAPPING (id, 
+                                                                          connectivity_id, 
+                                                                          status, 
+                                                                          priority, 
+                                                                          source_tp, 
+                                                                          source_cp, 
+                                                                          source_pb, 
+                                                                          source_ecn, 
+                                                                          source_tp_account, 
+                                                                          source_product, 
+                                                                          dest_id, 
+                                                                          dest_tp, 
+                                                                          dest_cp, 
+                                                                          dest_pb, 
+                                                                          dest_ecn, 
+                                                                          dest_tp_account, 
+                                                                          description, 
+                                                                          source_trade_type, 
+                                                                          dest_trade_type, 
+                                                                          dest_tp_trader, 
+                                                                          dest_tp_region, 
+                                                                          tp_concat)                     
+          (select MAPPING_SEQ.nextval, 
+                                                            c1.id,
+                                                            status,
+                                                            priority,
+                                                            s_tp,
+                                                            s_cp,
+                                                            s_pb,
+                                                            s_ecn,
+                                                            NULL,
+                                                            s_product,
+                                                            d_id,
+                                                            d_tp,
+                                                            d_cp,
+                                                            d_pb,
+                                                            d_ecn,
+                                                            NULL,
+                                                            description,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL   
+                                                    from L_VAR_SCHEMA.IC_SERVICE_MAPPING@L_VAR_DBLINK  t, 
+                                                         CONNECTIVITY c1 
+                                                    where  c1.address_id = t.s_id and 
+                                                           c1.system = L_VAR_ID)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADDRESS_TO_TRANSFORMER', '1.1.9.3.2', 'insert into ADDRESS_TO_TRANSFORMER (id,  system, connectivity_id, transformer_order, transformer_id, transformer_name) 
+                                                     (select ADDRESS_TO_TRANSFORMER_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             c1.id, 
+                                                             TRANSFORM_ORDER, 
+                                                             TRANSFORMER_ID, 
+                                                             trns.description
+                                                     from L_VAR_SCHEMA.SD_ADDRESS_2_TRANSFORMER@L_VAR_DBLINK  t, 
+                                                           CONNECTIVITY c1,  
+                                                           L_VAR_SCHEMA.IC_CNFG_TRANSFORMERS@L_VAR_DBLINK  trns 
+                                                     where  c1.address_id = t.address_id and 
+                                                            c1.system = L_VAR_ID  and 
+                                                            t.transformer_id = trns.id)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADAPTER_TRANSFORMER', 'DEFAULT', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADAPTER', 'DEFAULT', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADAPTER_TRANSFORMER', 'ADAPTER', 'insert into ADAPTER_TRANSFORMER
+(id,system,name, class_name, parameters)
+(select distinct id,L_VAR_ID,name, class_name, parameters
+from 
+L_VAR_SCHEMA.ADAPTER_TRANSFORMER@L_VAR_DBLINK T
+where (name, class_name) not in (select name, class_name from ADAPTER_TRANSFORMER))', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADAPTER', 'ADAPTER', 'insert into ADAPTER (id,system,name, path)
+(select distinct id, L_VAR_ID, name, path
+from L_VAR_SCHEMA.adapter@L_VAR_DBLINK T)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('CONNECTIVITY', 'ADAPTER', 'insert into connectivity (id,system,address_id,address_name,direction,update_time,connectivity_type,adapter, queue_name, queue_mgr,channel, 
+                                                                             server, 
+                                                                             port, 
+                                                                             user_name, 
+                                                                             email, 
+                                                                             directory, 
+                                                                             fix_connection_type, 
+                                                                             sender_comp_id, 
+                                                                             target_comp_id, 
+                                                                             address_status, 
+                                                                             address_server_name, 
+                                                                             channels_count, 
+                                                                             enabled_channels, 
+                                                                             additional_info,
+                                                                             start_date, 
+                                                                             end_date) 
+                                                    (select CONNECTIVITY_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             T.ADDRESS_ID, 
+                                                             ADDRESS_NAME, 
+                                                             T.DIRECTION, 
+                                                             UPDATE_TIME, 
+                                                             CONNECTIVITY_TYPE, 
+                                                             ADAPTER, 
+                                                             QUEUE_NAME, 
+                                                             QUEUE_MGR, 
+                                                             CHANNEL, 
+                                                             SERVER, 
+                                                             PORT, 
+                                                             USERNAME, 
+                                                             EMAIL, 
+                                                             DIRECTORY, 
+                                                             FIX_CONNECTION_TYPE, 
+                                                             SENDER_COMP_ID, 
+                                                             TARGET_COMP_ID, 
+                                                             ADDRESS_STATUS, 
+                                                             ADDRESS_SERVER_NAME, 
+                                                             CHANNELS_COUNT, 
+                                                             ENABLED_CHANNELS, 
+                                                             ADDITIONAL_INFO, 
+                                                             NULL start_date, 
+                                                             NULL end_date 
+                                                   from L_VAR_SCHEMA.v_connectivities@L_VAR_DBLINK T)', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('MAPPING', 'ADAPTER', 'select null from dual', 1, 1);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('CNFG_INSTANCE', 'ADAPTER', 'select null from dual', 1, 0);
+Insert into QUERY_IC_CONFIG
+   (TABLE_NAME, IC_VERSION, QUERY, STATUS, DISTRIB_TO_VIBE)
+ Values
+   ('ADDRESS_TO_TRANSFORMER', 'ADAPTER', 'insert into ADDRESS_TO_TRANSFORMER (id,  system, connectivity_id, transformer_order, transformer_id, transformer_name, PARAMETERS,status) 
+                                                     (select ADDRESS_TO_TRANSFORMER_SEQ.nextval,
+                                                             L_VAR_ID, 
+                                                             c1.id, 
+                                                             TRANSFORM_ORDER, 
+                                                             TRANSFORMER_ID, 
+                                                             transformer_name, 
+                                                             t.PARAMETERS, 
+                                                             1 
+                                                     from L_VAR_SCHEMA.SD_ADDRESS_2_TRANSFORMER@L_VAR_DBLINK  t, 
+                                                           CONNECTIVITY c1 
+                                                     where  c1.address_id = t.address_id and 
+                                                            c1.system = L_VAR_ID )', 1, 1);
+COMMIT;

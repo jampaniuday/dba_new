@@ -1,0 +1,18 @@
+create table IR_INDEXES_TO_FIX
+(
+    OWNER       varchar2(30) not null,
+    NAME        varchar2(30) not null,
+    HEIGHT      number       not null,
+    SIZE_MB     number       not null,
+    PCT_DELETED number       not null,
+    CHECK_TIME  date         not null,
+    FIX_TIME    date,
+    IS_FIXED    number(1)    not null
+)
+/
+
+grant all on IR_INDEXES_TO_FIX to PUBLIC
+/
+
+create public synonym IR_INDEXES_TO_FIX for IR_INDEXES_TO_FIX
+/

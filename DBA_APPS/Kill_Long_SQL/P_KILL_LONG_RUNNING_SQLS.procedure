@@ -1,0 +1,59 @@
+
+-- this function requires the ALTER SYSTEM privilige
+create or replace procedure P_KILL_LONG_RUNNING_SQLS (p_user in varchar2, p_seconds in number) is
+
+   cursor crs_problematic_sessions is
+	select s.*, q.sql_fulltext 
+	from   v$session s 
+	  join v$sql q
+	  on s.sql_id = q.sql_id
+	where status='ACTIVE'
+	  and type <>'BACKGROUND'
+	  and s.username = p_user
+	  and last_call_et> p_seconds
+	  and s.sql_address is not null
+	order by sid,serial#;
+
+   session_marked_for_kill EXCEPTION;
+   PRAGMA EXCEPTION_INIT(session_marked_for_kill, -31);
+
+begin
+   for session_rec in crs_problematic_sessions loop
+        
+        if DBMS_LOB.INSTR(session_rec.sql_fulltext,'/*DONT_KILL_ME*/',1,1) = 0 then
+			begin
+              execute immediate 'alter system kill session ''' || session_rec.sid || ',' ||session_rec.serial# || '''';
+			exception
+			  when session_marked_for_kill then
+			    null;
+			end;
+            
+            insert into kills_log (MESSAGE, SID, SERIAL#, USERNAME, OSUSER, MACHINE, TERMINAL, PROGRAM, SQL_ID, MODULE, CLIENT_INFO, SERVICE_NAME, SQL_TEXT) values ('Session ID: ' || session_rec.sid || '. serial#: ' || session_rec.serial# || ' was killed due to the following sql running too long (more than' || p_seconds || ' seconds).',
+                                   session_rec.SID, session_rec.SERIAL#, session_rec.USERNAME, session_rec.OSUSER, session_rec.MACHINE, session_rec.TERMINAL, session_rec.PROGRAM, session_rec.SQL_ID, session_rec.MODULE, session_rec.CLIENT_INFO, session_rec.SERVICE_NAME, session_rec.SQL_fulltext);
+            commit;
+        end if;
+   end loop;
+end;
+/
+
+GRANT EXECUTE ON P_KILL_LONG_RUNNING_SQLS TO PUBLIC
+/
+
+CREATE or replace PUBLIC SYNONYM P_KILL_LONG_RUNNING_SQLS FOR P_KILL_LONG_RUNNING_SQLS
+/
+
+BEGIN
+  delete VERSIONS
+  where  COMPONENT_NAME = 'KILL_LONG_SQL';
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values ('KILL_LONG_SQL',
+			          '0.2',
+					  SYSDATE);
+  commit;
+END;
+/
+
+

@@ -1,0 +1,997 @@
+CREATE OR REPLACE PACKAGE GS_SEARCH_SERVER_PKG AS
+-- This package is the engine for the Global search app.
+
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'Global Search';
+  VERSION       CONSTANT VARCHAR2(30) := '1.4';
+
+    -- This Function execute the search by creating tasks asynchronous via dbms_scheduler, it will generate the search unique identifier and return it.
+    -- pick the type_id from GS_SEARCH_TYPE, and provide the string you wanna search without ''
+    -- only exact matchs are supported.
+    FUNCTION EXECUTE_TYPE(P_TYPE_ID IN NUMBER, P_VALUE IN VARCHAR2) RETURN NUMBER;
+    
+    FUNCTION IS_NUMBER (p_string IN VARCHAR2) RETURN NUMBER;
+    
+    -- Gather stats on global search usage from gs_log and populate gs_usage_stats  table
+    PROCEDURE GATHER_USAGE_STATS;
+
+    -- Provide this function the search unique identifer provided by the EXECUTE_TYPE function, it will combine (append) all the finished tasks into and xml and return it.
+    FUNCTION APPEND_LOBS(P_SEARCH_UID IN NUMBER) RETURN CLOB;
+
+    -- Mainly for internal usage, provide a task id from GS_SEARCH_TASKS_TBL to get a status update.
+    -- used by GS_SEARCH_TASKS view.
+    FUNCTION GS_TASK_STATUS(L_GS_SEARCH_TASKS_ID in NUMBER) RETURN VARCHAR2 DETERMINISTIC;
+
+    -- Allow the creation of searchs (search types) in bulks.
+    -- first populate table GS_TEMP_SEARCH_BULK, then execute this procedure.
+    PROCEDURE BULK_SEARCH_INSERTS (bulk_id IN number);
+
+    -- Provide the type_id to complete remove a search type_id  from all the configuration tables.
+    PROCEDURE DROP_SEARCH_TYPE (P_TYPE_ID in NUMBER);
+
+    -- used after bulk_search_inserts procedure, will verify new search tasks.
+    PROCEDURE VERIFY_BULK_SEARCHS (v_type_id IN NUMBER);
+
+    -- This procedure clear old entries in the GS_SEARCH_TASKS_TBL, by default all finished searched older then a day will be deleted.
+    PROCEDURE TRIM_SEARCH_RESULT_TBS (P_DATE_KEEP IN DATE DEFAULT (SYSDATE-1));
+
+    -- Get search unq id and kill all related tasks.
+    FUNCTION KILL_SEARCH (P_SEARCH_UID IN NUMBER) RETURN NUMBER;
+
+    -- write to gs_log
+    PROCEDURE WRITE_LOG (P_SEARCH_UID IN NUMBER,P_TASK_ID IN NUMBER,P_TASK_QUERY IN VARCHAR2 DEFAULT NULL,P_TYPE_ID IN NUMBER, L_ACTION IN VARCHAR2,P_VALUE IN VARCHAR2, P_ERRM IN VARCHAR2 DEFAULT NULL,P_SEARCH_RESULT IN CLOB DEFAULT NULL);
+    
+    -- verfiy active search intergrity
+    PROCEDURE VERIFY_ACTIVE_SEARCH (v_type_id IN NUMBER) ;
+
+END GS_SEARCH_SERVER_PKG;
+/
+
+CREATE OR REPLACE PACKAGE BODY GS_SEARCH_SERVER_PKG AS
+
+
+-- check if string is number, 1 is a number, 0 not a numric value
+FUNCTION IS_NUMBER (p_string IN VARCHAR2)
+   RETURN NUMBER
+IS
+   v_new_num NUMBER;
+BEGIN
+   v_new_num := TO_NUMBER(p_string);
+   RETURN 1;
+EXCEPTION
+WHEN VALUE_ERROR THEN
+   RETURN 0;
+END IS_NUMBER;
+
+
+ -- Provide this function the search unique identifer provided by the EXECUTE_TYPE function, it will combine (append) all the finished tasks into and xml and return it.
+FUNCTION APPEND_LOBS                       (P_SEARCH_UID   IN NUMBER) RETURN CLOB IS P_LOB CLOB;
+
+                                            L_TASK_MIN_ORDER     NUMBER(30);
+                                            L_TASK_MAX_ORDER     NUMBER(30);
+                                            L_SEARCH_UID         NUMBER(30);
+                                            L_LOB                CLOB;
+                                            L_STATUS             VARCHAR2(30);
+                                            v_errm               VARCHAR2(4000);
+                                            C_APP_NAME           CONSTANT VARCHAR2(200) := 'GLOBAL_SEARCH.QUERY_GEN'||' ['||Sys_Context('USERENV','SID')||']';
+
+BEGIN
+
+-- Raise appliction error if search uid is not valid.
+-----------------------------------------------------------
+SELECT COUNT(1)
+INTO L_SEARCH_UID
+FROM GS_SEARCH_TASKS
+WHERE SEARCH_UID = P_SEARCH_UID;
+
+   IF L_SEARCH_UID  = 0 THEN
+                v_errm := P_SEARCH_UID||' is not a Valid Search uid, please refer to GS_SEARCH_TASKS table';
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, null, Log_Manager.Msg_Type_Info);
+                raise_application_error(-20102, 'Not a Valid Search uid, please refer to GS_SEARCH_TASKS table');
+   END IF;
+-----------------------------------------------------------
+
+-- Check the entire search uid status
+SELECT CASE WHEN COUNT(STATUS)>0 THEN 'false' WHEN COUNT(STATUS)=0 THEN 'true' END
+INTO L_STATUS
+FROM GS_SEARCH_TASKS
+WHERE SEARCH_UID = P_SEARCH_UID
+AND STATUS <> 'DONE';
+
+
+dbms_lob.createtemporary(P_LOB,true);
+dbms_lob.append(P_LOB, '<Full_results search_uid="'||P_SEARCH_UID||'" isdone="'||L_STATUS||'">');
+
+
+   SELECT MIN(EXECUTION_ORDER),MAX(EXECUTION_ORDER)
+   INTO L_TASK_MIN_ORDER,L_TASK_MAX_ORDER
+   FROM GS_SEARCH_TASKS
+   WHERE SEARCH_UID = P_SEARCH_UID;
+
+
+      FOR i IN L_TASK_MIN_ORDER..L_TASK_MAX_ORDER LOOP
+      
+      BEGIN
+      SELECT RESULT
+      INTO L_LOB
+      FROM GS_SEARCH_TASKS
+      WHERE EXECUTION_ORDER = i
+      AND SEARCH_UID = P_SEARCH_UID;
+      
+      dbms_lob.append(P_LOB, L_LOB);
+      EXCEPTION
+      WHEN OTHERS THEN
+     dbms_output.put_line (P_SEARCH_UID||'   '||sqlcode||'   num: '||i);
+     
+     end; 
+      
+      END LOOP;
+
+dbms_lob.append(P_LOB, '</Full_results>');
+
+-- Write to gs_log - if search ended.
+IF L_STATUS = 'true'  THEN
+write_log (P_SEARCH_UID => P_SEARCH_UID,P_TASK_ID => NULL,P_TYPE_ID => NULL,L_ACTION => 'ENDED(append_lob)',p_value => NULL,P_SEARCH_RESULT =>P_LOB);
+END IF;
+
+RETURN(P_LOB);
+
+dbms_lob.freetemporary(P_LOB);
+
+END APPEND_LOBS;
+
+
+    --  Get Unique Search id and search query, then sumbit and execute a job.
+PROCEDURE SUBMIT_TASK(L_GS_SEARCH_TASKS_ID IN OUT NUMBER , L_SEARCH_QUERY in out VARCHAR2) is
+
+BEGIN
+-------------------------------------------------
+-------- Submit job and execute
+-------------------------------------------------
+                  DECLARE
+                      L_WHAT VARCHAR2(4000) :='
+
+              DECLARE
+
+              L_RESULTS             CLOB;
+              L_TEMP                CLOB;
+              L_RETURN              CLOB;
+
+              BEGIN
+
+              update GS_SEARCH_TASKS_tbl
+              set START_TIME = CURRENT_TIMESTAMP
+              where ID = '||L_GS_SEARCH_TASKS_ID||';
+
+              commit;
+
+              dbms_lob.createtemporary(L_RETURN,true);
+              dbms_lob.createtemporary(L_TEMP,true);
+              dbms_lob.createtemporary(L_RESULTS,true);
+              L_RETURN := ''<all_results>'';
+
+              execute immediate ''' ||REPLACE(l_search_query,'''','''''')|| ''' into L_TEMP;
+
+              dbms_lob.append(L_RESULTS,L_TEMP);
+
+              COMMIT;
+
+              --dbms_lock.sleep(1000);
+
+              dbms_lob.append(L_RETURN,L_RESULTS);
+              dbms_lob.append(L_RETURN,''</all_results>'');
+
+              update GS_SEARCH_TASKS_tbl
+              set RESULT = L_RETURN, Status =''DONE''
+              where ID = '||L_GS_SEARCH_TASKS_ID||';
+
+              commit;
+
+             dbms_lob.freetemporary(L_RETURN);
+             dbms_lob.freetemporary(L_TEMP);
+             dbms_lob.freetemporary(L_RESULTS);
+
+
+             END;';
+                  BEGIN
+
+                  --DBMS_OUTPUT.PUT_LINE( L_WHAT);
+
+                    DBMS_SCHEDULER.create_job (
+                        job_name        => 'GS_SEARCH_TASK_'||L_GS_SEARCH_TASKS_ID,
+                        job_type        => 'PLSQL_BLOCK',
+                        job_action      => L_WHAT,
+                        start_date      => SYSTIMESTAMP,
+                        end_date        => NULL,
+                        enabled         => TRUE,
+                        comments        => 'This job is a task running under the GS Server');
+
+                   END;
+
+           COMMIT;
+
+/*              dbms_lob.freetemporary(L_RETURN);
+              dbms_lob.freetemporary(L_TEMP);
+              dbms_lob.freetemporary(L_RESULTS);*/
+
+
+END SUBMIT_TASK;
+
+
+-- Mainly for internal usage, provide a task id from GS_SEARCH_TASKS_TBL to get a status update.
+-- used by GS_SEARCH_TASKS view.
+FUNCTION GS_TASK_STATUS(L_GS_SEARCH_TASKS_ID in NUMBER) RETURN VARCHAR2 DETERMINISTIC IS STATUS VARCHAR2(15);
+
+BEGIN
+
+  SELECT STATE
+  INTO STATUS
+  FROM DBA_scheduler_jobs
+  WHERE job_name LIKE 'GS_SEARCH_TASK_'||L_GS_SEARCH_TASKS_ID;
+
+RETURN(STATUS);
+
+
+  EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+
+  STATUS := 'DONE';
+
+RETURN(STATUS);
+
+
+end GS_TASK_STATUS;
+
+
+-- Generate the search query, get Type_id, search string and create the search query.
+PROCEDURE QUERY_GEN(P_TYPE_ID in NUMBER, P_VALUE in VARCHAR2,L_GS_SEARCH_TASKS_ID IN number,i IN NUMBER, L_SEARCH_QUERY in out VARCHAR2,p_data_type OUT VARCHAR2)
+
+IS
+
+l_table_name VARCHAR2(30);
+l_table_desc VARCHAR2(30);
+l_system VARCHAR2(30);
+l_schema VARCHAR2(30);
+l_db_link VARCHAR2(30);
+l_column_name VARCHAR2(30);
+l_data_type VARCHAR2(30);
+l_wrapper VARCHAR2(10);
+l_result_view VARCHAR2(30);
+l_result_view_test VARCHAR2(30);
+v_errm VARCHAR2(4000);
+C_APP_NAME              CONSTANT VARCHAR2(200) := 'GLOBAL_SEARCH.QUERY_GEN'||' ['||Sys_Context('USERENV','SID')||']';
+l_limit_rows NUMBER(10);
+l_xmlquery VARCHAR2(4000);
+V_DT_CHK   VARCHAR2(10);
+
+
+
+BEGIN
+
+    
+------------------------------------------------
+---- check if search value is number
+------------------------------------------------
+    select case is_number(P_VALUE) when 1 then 'ANY' when 0 then 'NUMBER' END
+    into V_DT_CHK
+    from dual;
+------------------------------------------------
+
+
+SELECT ta.TABLE_NAME,s.APPLICATION,upper(s.DB_SCHEMA),s.DB_LINK,sc.COLUMN_NAME,SC.DATA_TYPE,upper(ta.RESULT_VIEW),ta.RETURN_ROW_LIMIT,ta.DESCRIPTION
+INTO l_table_name,l_system,l_schema,l_db_link,l_column_name,l_data_type,l_result_view,l_limit_rows,l_table_desc
+FROM ACTIVE_APP_LIST s, GS_TABLES ta,GS_SEARCH_COLUMNS sc,GS_SEARCH_TYPES_DET stt
+where stt.SYSTEM_ID = s.ID
+AND sc.TABLE_ID = ta.ID
+AND stt.COLUMN_ID  = sc.ID
+AND stt.EXECUTION_ORDER = i
+AND stt.TYPE_ID = P_TYPE_ID;
+
+
+
+IF V_DT_CHK != l_data_type THEN
+
+-- Raise appliction error if result view is not valid/ or doesnt exist.
+EXECUTE IMMEDIATE 'SELECT count(1)
+FROM DBA_TAB_COLUMNS@' || l_db_link || '
+WHERE OWNER = upper('''|| l_schema ||''')
+AND table_name = ''' || l_result_view || '''
+AND COLUMN_NAME = ''' || l_column_name || '''' INTO l_result_view_test;
+
+   IF l_result_view_test = 0 THEN
+                v_errm := l_result_view||' on '||l_schema||'@'||l_db_link||' enviroment is not a Valid view or '||l_column_name||' is missing from the view.';
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, null, Log_Manager.Msg_Type_Error);
+                raise_application_error(-20103, v_errm);
+
+   END IF;
+---------------------------------------------------------
+--------------
+
+IF l_data_type IN ('VARCHAR2','DATE') THEN
+l_wrapper := '''';
+ELSE
+l_wrapper := '';
+END IF;
+
+
+l_xmlquery := q'!WITH dynamic_sql AS
+(
+SELECT T.TABLE_NAME, 'xmlelement("headers", ' || listagg(q'#XMLELEMENT("column", XMLATTRIBUTES('#' ||t.COLUMN_NAME || q'#' AS "name", '#' || DECODE(t.DATA_TYPE,'NUMBER','long','VARCHAR2','string','DATE','dateTime') || q'#' AS "datatype"))#', ', ') WITHIN GROUP (ORDER BY t.COLUMN_ID) || '   )' AS headers,
+  ' xmlagg(XMLELEMENT("record",' || listagg('XMLELEMENT("' || t.COLUMN_NAME || '",' ||decode(t.data_type,'DATE','to_char(','TIMESTAMP','to_char(')|| ' t2."' || t.column_name ||'"' ||decode(t.data_type,'DATE',',''DD/MM/YYYY HH24:MI:SS'')','TIMESTAMP',',''DD/MM/YYYY HH24:MI:SS'')')|| ')' ,',') WITHIN GROUP (ORDER BY t.COLUMN_ID) ||  ')) ' || '' AS RECORDS
+FROM DBA_TAB_COLUMNS@%%l_db_link%% t
+WHERE t.OWNER = '%%l_schema%%'
+AND t.TABLE_NAME ='%%l_result_view%%'
+GROUP BY t.TABLE_NAME
+)
+SELECT
+q'#SELECT (
+-----------------------------------------------------------------------------------------------------
+XMLELEMENT("task_results",XMLATTRIBUTES( '%%l_gs_search_tasks_id%%' AS "task_id", COUNT(*) AS "record_count", decode(count(*),%%l_limit_rows%%,'potentially','false')  as "has_more",'%%l_table_desc%% (%%l_table_name%%)'  AS "source", '%%l_system%%' AS "system", ora_hash('%%l_system%%'||'%%l_table_name%%')  AS "source_uid"),
+    #'
+     || t2.headers || q'#,
+   XMLELEMENT("records",
+     #' ||t2.records || q'#)
+      )
+-------------------------------------------------------------
+).getclobval() XML
+FROM dual t
+JOIN %%l_schema%%.#'|| T2.TABLE_NAME||q'#@%%l_db_link%% t2 ON %%l_column_name%% = %%l_wrapper%%%%p_value%%%%l_wrapper%% and rownum <=%%l_limit_rows%%#'
+FROM dynamic_sql t2!';
+
+
+
+/* Formatted on 2/28/2013 12:24:59 PM (QP5 v5.126.903.23003) */
+l_xmlquery :=  replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(l_xmlquery,'%%l_table_desc%%',l_table_desc),'%%l_db_link%%',l_db_link),'%%l_schema%%',l_schema),'%%l_result_view%%',l_result_view),'%%l_gs_search_tasks_id%%',l_gs_search_tasks_id),'%%l_table_name%%',l_table_name),'%%l_system%%',l_system),'%%l_column_name%%',l_column_name),'%%l_wrapper%%',l_wrapper),'%%p_value%%',p_value),'%%l_limit_rows%%',l_limit_rows);
+
+-- DBMS_OUTPUT.PUT_LINE( l_xmlquery);
+EXECUTE IMMEDIATE l_xmlquery INTO L_SEARCH_QUERY;
+--DBMS_OUTPUT.PUT_LINE( l_search_query);
+
+p_data_type := 'OK';
+
+ELSE
+
+p_data_type := 'SKIP';
+
+END IF;
+
+end QUERY_GEN;
+
+
+-- Insert task into GS_SEARCH_TASKS
+procedure INSERT_TASK(P_TYPE_ID in NUMBER, L_SEARCH_UID in out NUMBER, L_GS_SEARCH_TASKS_ID in out NUMBER, L_SEARCH_QUERY in out VARCHAR2,L_I IN OUT NUMBER,p_data_type in VARCHAR2) is
+    L_TYPE_DET_ID        NUMBER(30);
+    
+begin
+
+   
+    SELECT gst.ID
+    INTO L_TYPE_DET_ID
+    FROM GS_SEARCH_TYPES_DET gst
+    WHERE gst.TYPE_ID = P_TYPE_ID
+    AND gst.EXECUTION_ORDER = L_I;
+
+    INSERT INTO GS_SEARCH_TASKS_TBL (ID,SEARCH_UID,TYPE_DET_ID,SEARCH_QUERY,RESULT_COUNT,RESULT,CREATION_TIME,START_TIME,DURATION,EXECUTION_ORDER)
+    VALUES (L_GS_SEARCH_TASKS_ID,L_SEARCH_UID,L_TYPE_DET_ID,L_SEARCH_QUERY,NULL,empty_clob(),SYSDATE,NULL,NULL,L_I);
+
+    COMMIT;
+
+end INSERT_TASK;
+
+
+-- Get type_id (from GS_SEARCH_TYPE table) and a search string, after execution get the search unique identifier
+FUNCTION EXECUTE_TYPE                     (P_TYPE_ID      IN NUMBER,
+                                           P_VALUE        IN VARCHAR2) RETURN NUMBER IS P_SEARCH_UID NUMBER(30);
+
+
+                                            L_TASK_MIN_ORDER     NUMBER(30);
+                                            L_TASK_MAX_ORDER     NUMBER(30);
+                                            L_SEARCH_UID         NUMBER(30);
+                                            L_GS_SEARCH_TASKS_ID NUMBER(30);
+                                            L_SEARCH_QUERY       VARCHAR2(4000);
+                                            L_I                  NUMBER(30);
+                                            C_APP_NAME           CONSTANT VARCHAR2(200) := 'GLOBAL_SEARCH.QUERY_GEN'||' ['||Sys_Context('USERENV','SID')||']';
+                                            v_errm               VARCHAR2(4000);
+                                            v_limits             NUMBER(6);
+                                            v_block_limit        NUMBER(6);
+                                            p_data_type          varchar2(10);
+                                            PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+
+-------------------------------------------------
+---- Preform a check of Active searchs and block a new search if the limit is reached.
+-------------------------------------------------
+    BEGIN
+
+    v_block_limit := 5;
+
+    SELECT count(DISTINCT(search_uid))
+    INTO v_limits
+    FROM GS_SEARCH_TASKS_TBL
+    WHERE status NOT IN ('DONE','KILLED');
+
+        IF v_limits >= v_block_limit THEN
+
+                        raise_application_error(-20103, 'Too many active searchs ('||v_limits||'), please try again shortly');
+
+        END IF;
+
+    END;
+
+-------------------------------------------------
+---- Create and insert task into GS_SEARCH_TASKS.
+-------------------------------------------------
+
+-- Genrate Dynamic SQL and Insert into GS_SEARCH_TASKS
+
+   BEGIN
+
+   SELECT MIN(EXECUTION_ORDER),MAX(EXECUTION_ORDER)
+   INTO L_TASK_MIN_ORDER,L_TASK_MAX_ORDER
+   FROM GS_SEARCH_TYPES_DET
+   WHERE TYPE_ID = P_TYPE_ID;
+
+-- Raise appliction error if type id is not valid.
+       IF L_TASK_MIN_ORDER IS NULL OR L_TASK_MAX_ORDER IS NULL THEN
+                    v_errm := P_TYPE_ID||' is not a Valid Type id, please refer to GS_SEARCH_TYPE table';
+                    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, null, Log_Manager.Msg_Type_Info);
+                    raise_application_error(-20101, 'Not a Valid Type id, please refer to GS_SEARCH_TYPE table');
+
+       END IF;
+---------------------------------------------------
+
+   L_SEARCH_UID := gs_seq.NEXTVAL;
+
+
+-- Write to gs_log - search begins.
+write_log (P_SEARCH_UID => L_SEARCH_UID,P_TASK_ID => NULL,P_TYPE_ID => P_TYPE_ID,L_ACTION => 'Begin Search',p_value => P_VALUE);
+
+
+
+   FOR i IN L_TASK_MIN_ORDER..L_TASK_MAX_ORDER LOOP
+
+   L_GS_SEARCH_TASKS_ID := gs_seq.NEXTVAL;
+
+-- Genrate the Search query
+   QUERY_GEN(P_TYPE_ID, P_VALUE,L_GS_SEARCH_TASKS_ID,i, L_SEARCH_QUERY,p_data_type);
+
+    L_I := i;
+
+   if p_data_type != 'SKIP' THEN
+ 
+-- Create task
+   INSERT_TASK(P_TYPE_ID, L_SEARCH_UID, L_GS_SEARCH_TASKS_ID, L_SEARCH_QUERY,L_I,p_data_type);
+
+-- Sumbit and execute task using DBMS_SCHEDULRE
+   SUBMIT_TASK(L_GS_SEARCH_TASKS_ID, L_SEARCH_QUERY);
+   write_log (P_SEARCH_UID => L_SEARCH_UID,P_TASK_ID => L_GS_SEARCH_TASKS_ID,P_TYPE_ID => P_TYPE_ID,L_ACTION => 'task started',p_value => P_VALUE,P_TASK_QUERY =>L_SEARCH_QUERY);
+   
+   END IF;
+
+   END LOOP;
+
+   END;
+
+P_SEARCH_UID := L_SEARCH_UID;
+
+RETURN P_SEARCH_UID;
+
+END EXECUTE_TYPE;
+
+
+
+-- Allow the creation of searchs (search types) in bulks.
+-- first populate table GS_TEMP_SEARCH_BULK, then execute this procedure.
+PROCEDURE BULK_SEARCH_INSERTS (bulk_id IN number) IS
+
+
+v_table_id VARCHAR2(30);
+v_type_id NUMBER(30);
+v_system_id NUMBER(30);
+v_column_id NUMBER(30);
+v_type_exists NUMBER(1);
+v_execution_order NUMBER(6);
+v_verfiy_status number;
+v_desc varchar2(1000);
+
+
+BEGIN
+
+-- Verfiy GS_TEMP_SEARCH_BULK validaty
+VERIFY_BULK_SEARCHS (bulk_id);
+
+select count(1)
+into v_verfiy_status
+from GS_TEMP_SEARCH_BULK
+where VERIFICATION = 'FAILED'
+and type_id = bulk_id;
+
+if v_verfiy_status > 0 THEN
+
+Raise_Application_Error (-20345, 'There are '||v_verfiy_status||' errors in GS_TEMP_SEARCH_BULK, fix and retry');
+
+END IF;
+
+-- get descrption
+
+select DESCRIPTION 
+into v_desc
+from GS_TEMP_SEARCH_BULK
+where  type_id = bulk_id
+and rownum <2;
+
+
+-- Check if the type_id allready exists - if so new search tasks will be appended.
+
+SELECT COUNT(1)
+INTO v_type_exists
+FROM GS_SEARCH_TYPE
+WHERE id = bulk_id;
+
+
+-- inserts into GS_TABLES
+BEGIN
+
+    FOR idx  IN (SELECT table_name,result_view,return_row_limit FROM GS_TEMP_SEARCH_BULK WHERE STATUS ='CREATED' and VERIFICATION ='OK' AND type_id = bulk_id  MINUS SELECT table_name,result_view,return_row_limit FROM GS_SEARCH_TYPE_LIST) LOOP
+
+    INSERT INTO GS_TABLES
+    VALUES (gs_seq.NEXTVAL,idx.table_name,idx.result_view,idx.return_row_limit,NULL,20,null);
+
+
+    END LOOP;
+
+
+END;
+
+
+-- insert into GS_SEARCH_COLUMNS
+BEGIN
+
+  FOR idx IN (SELECT COLUMN_NAME, table_name, DATA_TYPE
+              FROM GS_TEMP_SEARCH_BULK a
+              WHERE     STATUS = 'CREATED'
+                 AND VERIFICATION ='OK'
+                 AND type_id = bulk_id
+                 AND ROWID =
+                   (SELECT MIN (ROWID)
+                    FROM GS_TEMP_SEARCH_BULK b
+                    WHERE b.COLUMN_NAME = a.COLUMN_NAME
+                      AND b.table_name = a.table_name
+                      AND b.DATA_TYPE = a.DATA_TYPE
+                      AND type_id = bulk_id)
+              MINUS
+              SELECT COLUMN_NAME, table_name, DATA_TYPE FROM GS_SEARCH_TYPE_LIST) LOOP
+
+     SELECT ID
+     INTO v_table_id
+     FROM gs_tables
+     WHERE table_name =idx.table_name;
+
+     INSERT INTO GS_SEARCH_COLUMNS
+     VALUES (gs_seq.NEXTVAL,v_table_id,idx.column_name,'NA',idx.DATA_TYPE);
+
+  END LOOP;
+
+
+END;
+
+
+
+-- create a new type GS_SEARCH_TYPE (only if it`select not exist already)
+
+IF v_type_exists = 0 THEN
+
+    BEGIN
+
+        v_type_id := gs_seq.NEXTVAL;
+
+        INSERT INTO GS_SEARCH_TYPE
+        VALUES (v_type_id,v_desc,1000);
+
+    END;
+
+ELSE
+        v_type_id := bulk_id;
+
+
+END IF;
+
+-- create search tasks (GS_SEARCH_TYPES_DET)
+BEGIN
+
+-- Genrate EXECUTION_ORDER
+    IF v_type_exists = 0 THEN
+
+    v_execution_order := 1;
+
+    ELSE
+
+    SELECT MAX(EXECUTION_ORDER)
+    INTO v_execution_order
+    FROM GS_SEARCH_TYPES_DET
+    WHERE type_id = bulk_id;
+
+    END IF;
+
+
+    FOR idx IN (SELECT TABLE_NAME,COLUMN_NAME,DB_SCHEMA,DB_LINK FROM GS_TEMP_SEARCH_BULK WHERE STATUS ='CREATED' AND VERIFICATION ='OK' AND type_id = bulk_id) LOOP
+
+    v_execution_order := v_execution_order+1;
+
+    SELECT c.ID
+    INTO v_column_id
+    FROM GS_SEARCH_COLUMNS c, GS_TABLES t
+    WHERE c.TABLE_ID = t.ID
+    AND c.column_name = idx.COLUMN_NAME
+    AND t.TABLE_NAME = idx.TABLE_NAME;
+
+    SELECT ID
+    INTO v_system_id
+    FROM active_app_list
+    WHERE db_schema = idx.DB_SCHEMA
+    AND db_link = idx.DB_LINK
+    AND SYSTEM_TYPE ='IC';
+
+    INSERT INTO GS_SEARCH_TYPES_DET (ID,TYPE_ID,COLUMN_ID,SYSTEM_ID,EXECUTION_ORDER)
+    VALUES (gs_seq.NEXTVAL,v_type_id,v_column_id,v_system_id,v_execution_order);
+
+
+
+END LOOP;
+END;
+
+UPDATE GS_TEMP_SEARCH_BULK
+SET status = 'DONE'
+WHERE TYPE_ID = bulk_id
+AND STATUS ='CREATED'
+AND VERIFICATION = 'OK';
+
+COMMIT;
+
+
+
+END BULK_SEARCH_INSERTS;
+
+
+-- Provide the type_id to complete remove a search type_id  from all the configuration tables.
+PROCEDURE DROP_SEARCH_TYPE (P_TYPE_ID in NUMBER) IS
+
+v_column_id NUMBER(30);
+v_type_id NUMBER(30);
+
+BEGIN
+
+-- check if the type_id exists else throw expction
+    BEGIN
+
+    SELECT ID
+    INTO v_type_id
+    FROM GS_SEARCH_TYPE
+    WHERE ID = P_TYPE_ID;
+
+    EXCEPTION
+    WHEN no_data_found THEN
+
+    RAISE_APPLICATION_ERROR(-20999, 'TYPE_ID specified does not exist');
+
+    END;
+
+
+-- delete executed tasks from gs_search_tasks_tbl
+DELETE gs_search_tasks_tbl
+WHERE type_det_id IN (SELECT ID FROM GS_SEARCH_TYPES_DET WHERE type_id = P_TYPE_ID);
+
+-- delete tasks from GS_SEARCH_TYPES_DET
+DELETE GS_SEARCH_TYPES_DET
+WHERE type_id = P_TYPE_ID;
+
+-- delete type GS_SEARCH_TYPE
+
+DELETE GS_SEARCH_TYPE
+WHERE ID = P_TYPE_ID;
+
+-- delete columns
+
+DELETE GS_SEARCH_COLUMNS
+WHERE ID NOT IN (SELECT DISTINCT(column_id) FROM GS_SEARCH_TYPES_DET);
+
+-- delete gs_tables
+DELETE GS_TABLES
+WHERE ID NOT IN (SELECT DISTINCT(table_id) FROM GS_SEARCH_COLUMNS);
+
+
+COMMIT;
+
+END DROP_SEARCH_TYPE;
+
+
+
+
+-- this proecudre verfiy each search task in GS_TEMP_SEARCH_BULK table.
+PROCEDURE VERIFY_BULK_SEARCHS (v_type_id IN NUMBER)  IS
+
+v_stmt_query VARCHAR2(4000);
+v_stmt_query1 VARCHAR2(4000);
+v_stmt_query2  VARCHAR2(4000);
+v_ver_id NUMBER(30);
+v_ver_id1 NUMBER(30);
+emesg VARCHAR2(4000);
+err_code VARCHAR2(100);
+v_type_id_chk number;
+v_counter_type number default 0;
+v_counter_desc number default 0;
+v_count VARCHAR2(100);
+
+BEGIN
+
+
+-- check that all the type_id`s have the same description and vicversa = if not exit.
+    BEGIN
+
+    select count(distinct(DESCRIPTION))
+    into v_counter_desc
+    from GS_TEMP_SEARCH_BULK
+    where type_id = v_type_id;
+
+    if v_counter_desc <> 1 THEN
+    raise_application_error(-20010,'type_id and description mismatch');
+
+    END IF;
+    END;
+
+-- test if the dblink and db_schema indicated exists in active_app_list
+BEGIN
+
+    FOR idl IN (SELECT DB_SCHEMA,DB_LINK FROM GS_TEMP_SEARCH_BULK WHERE STATUS != 'DONE' and type_id = v_type_id MINUS SELECT DB_SCHEMA,DB_LINK FROM GS_SEARCH_TYPE_LIST) LOOP
+
+        FOR idx IN (SELECT idl.DB_SCHEMA,idl.DB_LINK FROM dual MINUS SELECT db_schema,db_link FROM active_app_list) LOOP
+
+        SELECT COUNT(*)
+        INTO v_count
+        FROM (SELECT idl.DB_SCHEMA,idl.DB_LINK FROM dual MINUS SELECT db_schema,db_link FROM active_app_list);
+        --DBMS_OUTPUT.PUT_LINE(v_count);
+
+        IF v_count > 0 THEN
+
+        UPDATE GS_TEMP_SEARCH_BULK
+        SET REJECT_REASON = 'db_link and db_schema doesnt exist on active_app_list table please verify',VERIFICATION = 'FAILED'
+        WHERE DB_SCHEMA= idx.DB_SCHEMA AND DB_LINK = idx.DB_LINK;
+
+        ELSE
+
+        UPDATE GS_TEMP_SEARCH_BULK
+        SET REJECT_REASON = null,VERIFICATION = 'OK'
+        WHERE DB_SCHEMA= idx.DB_SCHEMA AND DB_LINK = idx.DB_LINK and type_id = v_type_id;
+
+        END IF;
+        END LOOP;
+
+    END LOOP;
+
+COMMIT;
+END;
+
+
+-- check if the results view exists,
+FOR i IN (SELECT ROWID,TYPE_ID,DESCRIPTION,DB_SCHEMA,DB_LINK,TABLE_NAME,RESULT_VIEW,RETURN_ROW_LIMIT,EXECUTION_ORDER,column_name,DATA_TYPE
+          FROM GS_TEMP_SEARCH_BULK
+          WHERE status != 'DONE'
+          and VERIFICATION != 'OK'
+          and type_id = v_type_id ) LOOP
+
+-- verify that the result view exists
+v_stmt_query := 'SELECT count('||i.column_name||'),count(id) from '||i.DB_SCHEMA||'.'||i.RESULT_VIEW||'@'||i.DB_LINK||' where  1=0';
+v_stmt_query2 := 'select count(1) from dba_tab_columns@'||i.DB_LINK||' where owner = '''||i.DB_SCHEMA||''' and table_name = '''||i.TABLE_NAME||''' and  column_name = '''||i.column_name||''' and data_type = '''||i.data_type||'''';
+
+DBMS_OUTPUT.PUT_LINE('test: '|| v_stmt_query);
+
+
+
+    BEGIN
+
+    EXECUTE IMMEDIATE v_stmt_query;
+    EXECUTE IMMEDIATE v_stmt_query2 INTO v_ver_id1;
+
+        IF v_ver_id1 = 0 THEN
+
+        UPDATE GS_TEMP_SEARCH_BULK
+        SET VERIFICATION = 'FAILED', REJECT_REASON = 'Datatype mismatch'
+        WHERE ROWID = i.ROWID;
+
+        ELSE
+
+        UPDATE GS_TEMP_SEARCH_BULK
+        SET VERIFICATION = 'OK', REJECT_REASON = NULL
+        WHERE ROWID = i.ROWID;
+
+        END IF;
+
+    COMMIT;
+
+    EXCEPTION
+    WHEN OTHERS THEN
+
+    emesg := SQLERRM;
+    err_code := SQLCODE;
+
+    UPDATE GS_TEMP_SEARCH_BULK
+    SET VERIFICATION = 'FAILED', REJECT_REASON = emesg
+    WHERE ROWID = i.ROWID;
+
+    IF err_code = '-942' THEN
+    UPDATE GS_TEMP_SEARCH_BULK
+    SET VERIFICATION = 'FAILED', REJECT_REASON = 'Target Result view/or base table doesnt exist ('||emesg||')'
+    WHERE ROWID = i.ROWID;
+
+    END IF;
+
+    COMMIT;
+
+    END;
+
+-- check if target column is indexed. (only applies if VERIFICATIO = OK)
+
+v_stmt_query := 'select count(1) from dba_ind_columns@'||i.DB_LINK||' where index_owner = '''||i.DB_SCHEMA||''' and table_name = '''||i.TABLE_NAME||''' and  column_name = '''||i.column_name||''' and COLUMN_POSITION = 1';
+v_ver_id := NULL;
+
+EXECUTE IMMEDIATE v_stmt_query INTO v_ver_id;
+
+IF v_ver_id = 1 THEN
+
+    UPDATE GS_TEMP_SEARCH_BULK
+    SET is_indexed ='Y'
+    WHERE ROWID = i.ROWID;
+    commit;
+ELSE
+    UPDATE GS_TEMP_SEARCH_BULK
+    SET is_indexed ='N'
+    WHERE ROWID = i.ROWID;
+    commit;
+    
+END IF;
+
+END LOOP;
+END VERIFY_BULK_SEARCHS;
+
+
+-- This procedure clear old entries in the GS_SEARCH_TASKS_TBL, by default all finished searched older then a day will be deleted.
+PROCEDURE TRIM_SEARCH_RESULT_TBS (P_DATE_KEEP IN DATE DEFAULT (SYSDATE-1)) IS
+
+BEGIN
+
+DELETE GS_SEARCH_TASKS_TBL
+WHERE START_TIME < P_DATE_KEEP
+AND status ='DONE';
+
+COMMIT;
+
+END TRIM_SEARCH_RESULT_TBS;
+
+
+-- Get search unq id and kill all related tasks.
+FUNCTION KILL_SEARCH (P_SEARCH_UID IN NUMBER) RETURN NUMBER
+
+IS
+
+L_WHAT VARCHAR2(4000);
+L_COUNT NUMBER(30);
+v_task_count NUMBER(30);
+
+pragma autonomous_transaction;
+
+BEGIN
+
+--P_SEARCH_UID := 100050;
+
+SELECT COUNT(1)
+INTO L_COUNT
+FROM GS_SEARCH_TASKS
+WHERE status ='RUNNING'
+AND SEARCH_UID = P_SEARCH_UID;
+
+IF L_COUNT = 0 THEN
+
+raise_application_error(-20199, 'Search uid doesnt exists');
+
+END IF;
+
+FOR i IN (SELECT ID FROM GS_SEARCH_TASKS WHERE SEARCH_UID = P_SEARCH_UID AND status ='RUNNING') LOOP
+
+L_WHAT := 'begin
+    DBMS_SCHEDULER.STOP_JOB (
+    JOB_NAME =>''GS_SEARCH_TASK_'||i.id||''',
+    FORCE => TRUE
+    );
+    END;';
+
+EXECUTE IMMEDIATE L_WHAT;
+
+UPDATE GS_SEARCH_TASKS_TBL
+SET status = 'KILLED'
+WHERE ID = i.id;
+COMMIT;
+write_log (P_SEARCH_UID => P_SEARCH_UID,P_TASK_ID => i.ID,P_TYPE_ID => NULL,L_ACTION => 'task Killed',p_value => NULL);
+
+
+END LOOP;
+
+write_log (P_SEARCH_UID => P_SEARCH_UID,P_TASK_ID => NULL,P_TYPE_ID => NULL,L_ACTION => 'Killed Search',p_value => NULL);
+
+RETURN L_COUNT;
+
+END KILL_SEARCH;
+
+
+PROCEDURE WRITE_LOG (P_SEARCH_UID IN NUMBER,P_TASK_ID IN NUMBER,P_TASK_QUERY IN VARCHAR2 DEFAULT NULL,P_TYPE_ID IN NUMBER, L_ACTION IN VARCHAR2,P_VALUE IN VARCHAR2, P_ERRM IN VARCHAR2 DEFAULT NULL,P_SEARCH_RESULT IN CLOB DEFAULT NULL) IS
+
+
+pragma autonomous_transaction;
+BEGIN
+
+INSERT INTO GS_LOG (id, search_uid,task_id,task_query, search_type, action, time_stamp, search_string, error_msg,search_result)
+VALUES (gs_seq.NEXTVAL,P_SEARCH_UID,P_TASK_ID,P_TASK_QUERY,P_TYPE_ID,L_ACTION,SYSDATE,P_VALUE,P_ERRM,P_SEARCH_RESULT);
+COMMIT;
+
+
+END WRITE_LOG;
+
+
+PROCEDURE VERIFY_ACTIVE_SEARCH (v_type_id IN NUMBER) 
+IS
+
+v_stmt_query VARCHAR2(4000);
+v_checker number default 0;
+
+BEGIN
+
+FOR i IN (SELECT DB_SCHEMA,DB_LINK,TABLE_NAME,RESULT_VIEW,EXECUTION_ORDER,COLUMN_NAME,DATA_TYPE 
+          FROM GS_SEARCH_TYPE_LIST 
+          WHERE ID = v_type_id 
+          ORDER BY EXECUTION_ORDER) LOOP
+
+
+v_stmt_query := 'select b.ID,b.'||i.COLUMN_NAME||' from '||i.DB_SCHEMA||'.'||i.TABLE_NAME||'@'||i.DB_LINK||' a, '||i.DB_SCHEMA||'.'||i.RESULT_VIEW||'@'||i.DB_LINK||' b where a.ID = b.ID and rownum <2';
+
+        BEGIN
+
+        EXECUTE IMMEDIATE (v_stmt_query);
+        
+        EXCEPTION
+        WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE( i.DB_SCHEMA||','||i.DB_LINK||','||i.TABLE_NAME||','||i.COLUMN_NAME||', ERROR_CODE: '||SQLERRM);
+        v_checker := v_checker+1;
+
+        END;
+
+END LOOP;
+
+IF v_checker = 0 THEN
+DBMS_OUTPUT.PUT_LINE('This search type seems VALID');
+END IF;
+
+END VERIFY_ACTIVE_SEARCH;
+
+-- Gather stats on global search usage from gs_log and populate gs_usage_stats  table
+PROCEDURE GATHER_USAGE_STATS IS
+
+v_begin_date date;
+
+begin
+
+select max(Date_hourly)+1/24
+into v_begin_date
+from gs_usage_stats;
+
+if v_begin_date is null THEN
+v_begin_date := sysdate-7;
+end if;
+
+
+INSERT INTO GS_PROD.GS_USAGE_STATS (DATE_HOURLY, NUM_OF_SEARCHS, SEARCH_STRINGS) 
+(select  TRUNC(time_stamp,'HH'),count(1),wm_concat(search_string) from gs_log where action='Begin Search' and time_stamp > v_begin_date group by TRUNC(time_stamp,'HH'));
+commit;
+
+END GATHER_USAGE_STATS;
+
+
+END GS_SEARCH_SERVER_PKG;
+/

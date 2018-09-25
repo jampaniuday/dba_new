@@ -1,0 +1,25 @@
+
+CREATE OR REPLACE FORCE VIEW APP_DBA_TAB_PARTITIONS AS
+SELECT  to_date(regexp_substr((partition_manager.LONG_COLUMN(P_QUERY             => 'select high_value from dba_tab_partitions t where t.table_name=:table_name and partition_name = :partition_name and table_owner = :table_owner',
+                                             P_FIRST_BIND        => ':table_name',
+                                             P_FIRST_BIND_VALUE  => T.TABLE_NAME,
+                                             P_SECOND_BIND       => ':partition_name',
+                                             P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+                                             P_THIRD_BIND        => ':table_owner',
+                                             P_THIRD_BIND_VALUE  => T.TABLE_OWNER)),'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),'yyyy-mm-dd') - 1 partition_date, t."TABLE_OWNER",t."TABLE_NAME",t."COMPOSITE",t."PARTITION_NAME",t."SUBPARTITION_COUNT",t."HIGH_VALUE",t."HIGH_VALUE_LENGTH",t."PARTITION_POSITION",t."TABLESPACE_NAME",t."PCT_FREE",t."PCT_USED",t."INI_TRANS",t."MAX_TRANS",t."INITIAL_EXTENT",t."NEXT_EXTENT",t."MIN_EXTENT",t."MAX_EXTENT",t."MAX_SIZE",t."PCT_INCREASE",t."FREELISTS",t."FREELIST_GROUPS",t."LOGGING",t."COMPRESSION",t."COMPRESS_FOR",t."NUM_ROWS",t."BLOCKS",t."EMPTY_BLOCKS",t."AVG_SPACE",t."CHAIN_CNT",t."AVG_ROW_LEN",t."SAMPLE_SIZE",t."LAST_ANALYZED",t."BUFFER_POOL",t."FLASH_CACHE",t."CELL_FLASH_CACHE",t."GLOBAL_STATS",t."USER_STATS",t."IS_NESTED",t."PARENT_TABLE_PARTITION",t."INTERVAL",t."SEGMENT_CREATED"
+FROM dba_tab_partitions  t;
+
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM 	APP_DBA_TAB_PARTITIONS FOR APP_DBA_TAB_PARTITIONS';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+prompt
+prompt
+prompt if "GRANT SELECT ON APP_DBA_TAB_PARTITIONS TO PUBLIC" fails: GRANT SELECT ON SYS.DBA_TAB_PARTITIONS TO DBA_APPS WITH GRANT OPTION ( as sys)
+
+--GRANT SELECT ON APP_DBA_TAB_PARTITIONS TO PUBLIC;

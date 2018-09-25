@@ -1,0 +1,1688 @@
+CREATE OR REPLACE PACKAGE DBA_APPS.PARTITION_MANAGER AUTHID CURRENT_USER IS
+
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'PARTITION_MANAGER';
+  VERSION    CONSTANT VARCHAR2(30) := '2.1.1';
+  -- 07/07/2014 Fix index size calculation
+
+    -- version return function
+    FUNCTION FUNC_VERSION return VARCHAR2;
+  
+    PROCEDURE RUNALL_ARCHIVE_ACTIONS(P_OWNER IN VARCHAR2 DEFAULT USER);
+    
+    PROCEDURE ALLOCATE_AND_DROP_PARTITIONS(P_OWNER IN VARCHAR2 DEFAULT USER);
+    
+    PROCEDURE DROP_PARTITIONS_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER,
+                                             P_PM_ID IN NUMBER DEFAULT 0);
+    
+    PROCEDURE ALLOCATE_PARTITIONS_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER,
+                                             P_PM_ID IN NUMBER DEFAULT 0);
+    
+    FUNCTION GET_PARTITION_COLUMN(P_OWNER      IN VARCHAR2, 
+                                  P_TABLE_NAME IN VARCHAR2) RETURN VARCHAR2;
+    
+    PROCEDURE ADD_PARTITION(P_OWNER IN VARCHAR2, 
+                            P_TABLE IN VARCHAR2, 
+                            P_DATE  IN DATE,
+                            P_INSERT_STATEMENT VARCHAR2,
+                            P_PM_ID IN NUMBER DEFAULT 0);
+    
+    PROCEDURE write_pm_log     (p_pm_id                   NUMBER,
+                                p_schema_name           VARCHAR2,
+                                p_operation_time       timestamp,
+                                p_component            VARCHAR2,
+                                p_table_name           VARCHAR2,
+                                p_return_code          NUMBER,
+                                p_return_message       VARCHAR2,
+                                p_total_time_ms        NUMBER);
+                                
+    PROCEDURE analysis(P_PM_ID IN NUMBER DEFAULT 0);
+    
+    PROCEDURE rebuild_unusable_indexes(P_PM_ID IN NUMBER DEFAULT 0);
+    
+    PROCEDURE check_tablespaces(P_PM_ID IN NUMBER DEFAULT 0);
+    
+    FUNCTION LONG_COLUMN(P_QUERY IN VARCHAR2, P_FIRST_BIND IN VARCHAR2,
+                                             P_FIRST_BIND_VALUE IN VARCHAR2, P_SECOND_BIND IN VARCHAR2,
+                                             P_SECOND_BIND_VALUE IN VARCHAR2, P_THIRD_BIND IN VARCHAR2,
+                                             P_THIRD_BIND_VALUE IN VARCHAR2) RETURN VARCHAR2;
+                                             
+    PROCEDURE MOVE_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_SOURCE_TABLE VARCHAR2,
+                                                                            P_TEMP_TABLE VARCHAR2, P_DEST_TABLE VARCHAR2, P_FROM IN DATE,
+                                                                            P_TO IN DATE);
+
+    PROCEDURE DROP_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_TABLE VARCHAR2, P_FROM IN DATE,
+                                                                            P_TO IN DATE);
+                                                                            
+    FUNCTION EXISTS_PARTITION(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+        RETURN BOOLEAN;
+        
+    FUNCTION GET_PARTITION_NAME(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+        RETURN VARCHAR2;
+
+END PARTITION_MANAGER;
+/
+
+CREATE OR REPLACE PACKAGE BODY DBA_APPS.PARTITION_MANAGER IS
+
+   L_DATE_FORMAT VARCHAR2(30) := 'yyyymmdd';
+    
+   v_module_name       VARCHAR2 (100) := 'Partition Manager';
+   success             NUMBER := 0;
+   unknown_error       NUMBER := 2100;
+   internal_error      EXCEPTION;
+   interrupt_error     EXCEPTION;
+   schema_name         VARCHAR2(30);
+   
+    FUNCTION FUNC_VERSION return VARCHAR2
+    is
+    begin
+    return VERSION;
+    end FUNC_VERSION;
+
+    PROCEDURE RUNALL_ARCHIVE_ACTIONS(P_OWNER IN VARCHAR2 DEFAULT USER) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'RUNALL_ARCHIVE_ACTIONS';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+      log_return_message          VARCHAR2 (4000);
+      p_return_code               NUMBER := unknown_error;
+      l_pm_id                      NUMBER;
+      
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 0, 
+                                       p_message => 'Start RUNALL_ARCHIVE_ACTIONS for ' || P_OWNER );
+        
+        SELECT PARTITION_MANAGER_LOG_SEQ.nextval
+        INTO l_pm_id
+        FROM DUAL; 
+        
+        ALLOCATE_PARTITIONS_FOR_SCHEMA(P_OWNER, l_pm_id);
+        DROP_PARTITIONS_FOR_SCHEMA(P_OWNER, l_pm_id);
+        PARTITION_MANAGER.analysis(l_pm_id);
+
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 0, 
+                                       p_message => 'End RUNALL_ARCHIVE_ACTIONS for ' || P_OWNER );
+        
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+        PARTITION_MANAGER.write_pm_log (
+            l_pm_id,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            null,
+            success,
+            'RUNALL_ARCHIVE_ACTIONS finished successfully.',
+            run_timestamp_duration_ms
+         );
+         
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    EXCEPTION
+      WHEN OTHERS
+      THEN
+
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 2, 
+                                       p_message => 'RUNALL_ARCHIVE_ACTIONS for ' || P_OWNER || ' finished with errors. see partition_manager_log table. ' || SQLERRM);
+
+         IF p_return_code = unknown_error
+         THEN
+            log_return_message   :=
+               'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace();
+         END IF;
+
+         run_timestamp_duration_ms   :=
+            CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+            - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+
+         write_pm_log (
+            l_pm_id,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            null,
+            1999,
+            'RUNALL_ARCHIVE_ACTIONS finished with errors. ' || log_return_message,
+            run_timestamp_duration_ms
+         );
+         
+         DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END RUNALL_ARCHIVE_ACTIONS;
+    
+    PROCEDURE ALLOCATE_AND_DROP_PARTITIONS(P_OWNER IN VARCHAR2 DEFAULT USER) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'ALLOCATE_AND_DROP_PARTITIONS';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+      log_return_message          VARCHAR2 (4000);
+      p_return_code               NUMBER := unknown_error;
+      l_pm_id                      NUMBER;
+      
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+      
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 0, 
+                                       p_message => 'Start ALLOCATE_AND_DROP_PARTITIONS for ' || P_OWNER );
+                                       
+        SELECT PARTITION_MANAGER_LOG_SEQ.nextval
+        INTO l_pm_id
+        FROM DUAL; 
+        
+        ALLOCATE_PARTITIONS_FOR_SCHEMA(P_OWNER, l_pm_id);
+        DROP_PARTITIONS_FOR_SCHEMA(P_OWNER, l_pm_id);
+        PARTITION_MANAGER.analysis(l_pm_id);
+        
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 0, 
+                                       p_message => 'End ALLOCATE_AND_DROP_PARTITIONS for ' || P_OWNER );
+        
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+        PARTITION_MANAGER.write_pm_log (
+            l_pm_id,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            null,
+            success,
+            'ALLOCATE_AND_DROP_PARTITIONS finished successfully.',
+            run_timestamp_duration_ms
+         );
+         
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    EXCEPTION
+      WHEN OTHERS
+      THEN
+
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',
+                                       p_message_type => 2, 
+                                       p_message => 'RUNALL_ARCHIVE_ACTIONS for ' || P_OWNER || ' finished with errors. see partition_manager_log table. ' || SQLERRM);
+                                       
+         IF p_return_code = unknown_error
+         THEN
+            log_return_message   :=
+               'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace();
+         END IF;
+
+         run_timestamp_duration_ms   :=
+            CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+            - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+
+         write_pm_log (
+            l_pm_id,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            null,
+            1999,
+            'ALLOCATE_AND_DROP_PARTITIONS finished with errors. ' || log_return_message,
+            run_timestamp_duration_ms
+         );
+         
+         DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END ALLOCATE_AND_DROP_PARTITIONS;
+    
+    PROCEDURE DROP_PARTITIONS_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER,
+                                         P_PM_ID IN NUMBER DEFAULT 0) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'DROP_PARTITIONS_FOR_SCHEMA';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      table_run_timestamp_start      TIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;    
+      l_validation                  BOOLEAN := TRUE;
+      l_command                         VARCHAR2 (4000);
+      l_count                      NUMBER := 0;
+      l_count_dropped_partitions  NUMBER := 0;
+      l_DEST_TABLE_NAME              VARCHAR2 (40);
+      l_partition_name              all_partitions_to_drop.partition_name%type;
+      l_insert_by                  all_partitions_to_drop.insert_by%type;
+      l_time_since_last_alive      number;
+      
+      partition_not_exist EXCEPTION;
+      PRAGMA EXCEPTION_INIT(partition_not_exist,-2149);
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        -- For each of the owner's partitioned tables without destination
+        FOR I IN (SELECT TABLE_NAME,
+                         RETENTION,
+                         VALIDATION,
+                         UPD_GLOBAL_IND,
+                         drop_partition_only_if_empty,
+                         to_char(sysdate,'D') curr_day,
+						 to_number(to_char(sysdate,'HH24')) curr_hour
+                    FROM   PARTITION_DEFINITIONS T
+                    WHERE  STATUS = 1
+                    AND    OWNER = P_OWNER
+                    ORDER  BY ORDER_IN_PROCESS) LOOP
+                    
+          table_run_timestamp_start := SYSTIMESTAMP;
+          BEGIN
+          
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                SYSTIMESTAMP,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'Start dropping partitions for table ' || I.TABLE_NAME  ,
+                0
+               );
+               
+            l_count_dropped_partitions := 0;
+            
+            if I.validation is not null then
+              l_command := I.validation;
+              execute immediate  I.validation into l_validation;
+            end if;
+            
+            if l_validation then
+            
+                cmn_db_utils_pkg.alterTableFKs( pAction => 'disable',
+                                                pTable  => i.table_name,
+                                                pOwner  => p_owner);
+
+                cmn_db_utils_pkg.alterFKsReferringTable( pAction => 'disable',
+                                                        pTable  => i.table_name,
+                                                        pOwner  => p_owner);
+
+                EXECUTE IMMEDIATE 'select (sysdate-max(last_alive_time))*24*60 from ' || P_OWNER || '.IC_CNFG_INSTANCE'
+                into     l_time_since_last_alive
+                ;
+                    
+                WHILE TRUE LOOP 
+                  BEGIN
+                  
+                    run_timestamp_start         := SYSTIMESTAMP;
+                    
+                    SELECT partition_name, insert_by
+                      INTO l_partition_name, l_insert_by
+                      FROM (select partition_name, insert_by
+                            from   all_partitions_to_drop
+                            where  owner = p_owner
+                              and  table_name = I.TABLE_NAME
+                            order by insert_time)
+                    WHERE rownum < 2;
+
+                    l_command := 'alter table ' || i.table_name || ' drop partition ' || l_partition_name ;        
+                    
+
+                    
+                    if not (I.UPD_GLOBAL_IND = 'N' and (I.curr_day in ('1', '7') or (I.curr_day = '6' and I.curr_hour > 19)) and l_time_since_last_alive > 10) then
+                      l_command := l_command || ' update global indexes parallel 8';
+                    end if;
+                    
+                    execute immediate (l_command);
+                    
+                    l_count_dropped_partitions := l_count_dropped_partitions + 1;    
+                    
+                    delete all_partitions_to_drop
+                    where  owner = p_owner
+                      and  table_name = I.TABLE_NAME
+                      and  partition_name = l_partition_name;
+                      
+                    commit;
+                    
+                    run_timestamp_duration_ms   :=
+                        CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                        - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                        
+                    write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        0,
+                        'Partitions ' || l_partition_name || ' dropped per ' || l_insert_by || ' request.',
+                        run_timestamp_duration_ms
+                     );
+                     
+                  EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                      EXIT;
+                    WHEN partition_not_exist THEN
+                        delete all_partitions_to_drop
+                        where  owner = p_owner
+                          and  table_name = I.TABLE_NAME
+                          and  partition_name = l_partition_name;
+                          
+                        commit;
+                  END;
+                END LOOP;
+
+                EXECUTE IMMEDIATE 'select (sysdate-max(last_alive_time))*24*60 from ' || P_OWNER || '.IC_CNFG_INSTANCE'
+                into     l_time_since_last_alive
+                ;
+                
+                FOR J IN ( SELECT partition_name
+                            FROM (SELECT table_name,
+                                         partition_name,
+                                         TO_DATE (
+                                                  SUBSTR (high_value, INSTR (high_value, '''') + 1, 19),
+                                                   'YYYY-MM-DD HH24:MI:SS')  part_high_value
+                                    FROM TABLE (return_partitions)
+                                   WHERE table_name = I.TABLE_NAME
+                                    AND partition_name not in ('P_NEW', 'FIRST_PART')
+                                   )
+                             WHERE part_high_value <= TRUNC(SYSDATE - I.RETENTION)
+                            ORDER BY part_high_value) LOOP
+                    
+                    run_timestamp_start         := SYSTIMESTAMP;
+
+                    EXECUTE IMMEDIATE 'select max(DEST_TABLE_NAME) from all_archive_definitions where table_name = :table_name and OWNER = :P_OWNER'
+                      into l_DEST_TABLE_NAME
+                      using i.table_name, P_OWNER;
+                      
+
+                       
+                    if l_DEST_TABLE_NAME is not null or i.drop_partition_only_if_empty = 'Y' then
+                      l_command := 'select count(*) from ' || i.table_name || ' partition (' || j.partition_name || ')';
+                      execute immediate  l_command into l_count;
+                      
+                      -- Make sure there is archive policy for the table
+                      if i.drop_partition_only_if_empty = 'Y' and l_DEST_TABLE_NAME is null then
+                        write_pm_log (
+                            P_PM_ID,
+                            P_OWNER, 
+                            SYSTIMESTAMP,
+                            v_component,
+                            I.TABLE_NAME,
+                            2019,
+                            'There is no archive policy for ' || I.TABLE_NAME || '. Check PARTITION_DEFINITIONS.drop_partition_only_if_empty column.' ,
+                            0
+                         );
+                      end if;
+                    end if;
+              
+                    if l_count = 0 then
+                        l_command := 'alter table ' || i.table_name || ' drop partition ' || j.partition_name ;        
+                        
+                        if not (I.UPD_GLOBAL_IND = 'N' and (I.curr_day in ('1', '7') or (I.curr_day = '6' and I.curr_hour > 19)) and l_time_since_last_alive > 10) then
+                          l_command := l_command || ' update global indexes parallel 8';
+                        end if;
+                        
+                        execute immediate (l_command);
+                        
+                        l_count_dropped_partitions := l_count_dropped_partitions + 1;
+                    end if;
+                    
+                    run_timestamp_duration_ms   :=
+                        CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                        - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                        
+                    write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        0,
+                        CASE
+                           WHEN l_count = 0
+                           THEN
+                              'Partitions ' || j.partition_name || ' dropped. '
+                           ELSE
+                              'Partitions ' || j.partition_name || ' wasn''t dropped. There are ' || l_count || ' records in the partition that need to be moved to ' || l_DEST_TABLE_NAME
+                        END,
+                        run_timestamp_duration_ms
+                     );
+                     
+                     l_count := 0;
+                    
+                END LOOP;
+            
+                -- Dropping future partitions
+                FOR J IN ( SELECT partition_name
+                            FROM (SELECT table_name,
+                                         partition_name,
+                                         TO_DATE (
+                                                  SUBSTR (high_value, INSTR (high_value, '''') + 1, 19),
+                                                   'YYYY-MM-DD HH24:MI:SS')  part_high_value
+                                    FROM TABLE (return_partitions)
+                                   WHERE table_name = I.TABLE_NAME
+                                    AND partition_name not in ('P_NEW', 'FIRST_PART')
+                                   )
+                             WHERE part_high_value > TRUNC(SYSDATE + 365)
+                            ORDER BY part_high_value) LOOP
+                    
+                    run_timestamp_start         := SYSTIMESTAMP;
+
+                    l_command := 'select count(*) from ' || i.table_name || ' partition (' || j.partition_name || ')';
+                    execute immediate  l_command into l_count;
+              
+                    if l_count = 0 then
+                        l_command := 'alter table ' || i.table_name || ' drop partition ' || j.partition_name ;        
+                        
+                        if not (I.UPD_GLOBAL_IND = 'N' and (I.curr_day in ('1', '7') or (I.curr_day = '6' and I.curr_hour > 19)) and l_time_since_last_alive > 10) then
+                          l_command := l_command || ' update global indexes parallel 8';
+                        end if;
+                        
+                        execute immediate (l_command);
+                        
+                        l_count_dropped_partitions := l_count_dropped_partitions + 1;
+                    end if;
+                    
+                    run_timestamp_duration_ms   :=
+                        CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                        - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                        
+                    write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        0,
+                        CASE
+                           WHEN l_count = 0
+                           THEN
+                              'Partitions ' || j.partition_name || ' dropped. '
+                           ELSE
+                              'Partitions ' || j.partition_name || ' wasn''t dropped. There are ' || l_count || ' records in the future partition.'
+                        END,
+                        run_timestamp_duration_ms
+                     );
+                     
+                     l_count := 0;
+                    
+                END LOOP;
+                
+                cmn_db_utils_pkg.alterTableFKs( pAction => 'enable',
+                                                pTable  => i.table_name,
+                                                pOwner  => p_owner);
+
+                cmn_db_utils_pkg.alterFKsReferringTable( pAction => 'enable',
+                                                        pTable  => i.table_name,
+                                                        pOwner  => p_owner);
+                                                        
+                l_validation := true;
+                
+            else
+                write_pm_log (
+                    P_PM_ID,
+                    P_OWNER, 
+                    run_timestamp_start,
+                    v_component,
+                    I.TABLE_NAME,
+                    0,
+                    'Validation check for table ' || I.TABLE_NAME || ' is false. ' 
+                        || '. Validation: ' || l_command ,
+                    0
+                 );
+                 
+                 l_validation := true;
+            end if;        
+          
+          EXCEPTION
+            WHEN OTHERS THEN
+                run_timestamp_duration_ms   :=
+                    CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                    - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                    
+                write_pm_log (
+                    P_PM_ID,
+                    P_OWNER, 
+                    run_timestamp_start,
+                    v_component,
+                    I.TABLE_NAME,
+                    2013,
+                    'Drop partitions finished with errors. ' 
+                        || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace() ||
+                        '. Last command: ' || l_command ,
+                    run_timestamp_duration_ms
+                 );
+          END;
+          
+          run_timestamp_duration_ms   :=
+                    CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (table_run_timestamp_start);
+                    
+          write_pm_log (
+            P_PM_ID,
+            P_OWNER, 
+            table_run_timestamp_start,
+            v_component,
+            I.TABLE_NAME,
+            0,
+            'Drop partitions finished successfully. ' 
+                || l_count_dropped_partitions || ' partitions dropped. ',
+            run_timestamp_duration_ms
+           );
+
+        END LOOP;
+        
+        rebuild_unusable_indexes(p_pm_id);
+        
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+        
+      EXCEPTION
+        WHEN OTHERS THEN
+            run_timestamp_duration_ms   :=
+                CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                null,
+                2015,
+                'DROP_PARTITIONS_FOR_SCHEMA finished with errors. ' 
+                    || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace() ||
+                    '. Last command: ' || l_command ,
+                run_timestamp_duration_ms
+             );
+             RAISE;
+    END DROP_PARTITIONS_FOR_SCHEMA;
+
+    PROCEDURE ALLOCATE_PARTITIONS_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER,
+                                             P_PM_ID IN NUMBER DEFAULT 0) IS
+
+      L_LAST_THURSDAY          DATE;
+      L_LAST_TURSDAY_PART_NAME VARCHAR2(30);
+      L_NUM_ROWS                NUMBER;
+      L_INSERT_STATEMENT        VARCHAR2(32767);
+      prev_module              VARCHAR2 (50);
+      prev_action              VARCHAR2 (50);
+      v_component              VARCHAR2 (100) := 'ALLOCATE_PARTITIONS_FOR_SCHEMA';
+      l_command                   VARCHAR2 (4000) := '...';
+      l_avg_size               NUMBER(10);
+      l_prev_ind_name           VARCHAR2 (40);
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      table_run_timestamp_start      TIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+      log_return_message          VARCHAR2 (4000);
+      p_return_code               NUMBER := unknown_error;
+      l_count_part_renamed          NUMBER := 0;
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        -- Get last thursday's date
+        SELECT NEXT_DAY(TRUNC(SYSDATE - 7), 'THU') INTO L_LAST_THURSDAY FROM DUAL;
+
+        execute immediate 'alter session set ddl_lock_timeout=300';
+        
+        -- For each of the owner's partitioned tables
+        FOR I IN (SELECT TABLE_NAME,
+                         PARTITION_TABLESPACE_NAME,
+                         DAYS_AHEAD,
+                         nvl(PERIOD_SIZE, 1440) PERIOD_SIZE,
+                         nvl(DATE_FORMAT, 'yyyymmdd') DATE_FORMAT,
+                         nvl(GROWTH_FACTOR, 1) GROWTH_FACTOR,
+                         PART_PREFIX,
+                         keep_in_cache,
+                         ind_keep_in_cache
+                  FROM   PARTITION_DEFINITIONS T
+                  WHERE  STATUS = 1
+                  AND    OWNER = P_OWNER
+                ORDER BY ORDER_IN_PROCESS, 
+                         TABLE_NAME) LOOP
+        BEGIN
+          
+            run_timestamp_start := SYSTIMESTAMP;
+            table_run_timestamp_start := SYSTIMESTAMP;
+            
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'Start adding partitions for table ' || I.TABLE_NAME  ,
+                0
+               );
+            
+            l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' MODIFY default attributes tablespace ' || I.PARTITION_TABLESPACE_NAME;
+            execute immediate (l_command);
+            
+            FOR ind IN (SELECT INDEX_NAME
+                        FROM   USER_INDEXES
+                        WHERE  PARTITIONED = 'YES'
+                        AND    INDEX_TYPE not like '%LOB%'
+                        AND       TABLE_NAME = I.TABLE_NAME) LOOP
+                        
+                l_command := 'ALTER INDEX ' || ind.INDEX_NAME || ' MODIFY default attributes tablespace ' || I.PARTITION_TABLESPACE_NAME;
+                begin
+                  execute immediate (l_command);
+                exception
+                  when others then
+                     write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        SYSTIMESTAMP,
+                        v_component,
+                        null,
+                        2023,
+                        'Warning: Command ' || l_command || ' finished with error. ' || 'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace(),
+                        0);
+                end;
+            END LOOP;
+
+            
+            SELECT 'INSERT INTO ' || I.TABLE_NAME || '(' || listagg (column_name,',') within group(order by column_name )  || ') values (' || 
+                                                              listagg (DATA,',') within group(order by column_name ) || ')'            
+            INTO   L_INSERT_STATEMENT
+            FROM   (SELECT CASE
+                         WHEN T.DATA_TYPE = 'NUMBER' THEN
+                            TO_CHAR(-9)
+                         WHEN T.DATA_TYPE = 'DATE' OR T.DATA_TYPE LIKE 'TIMESTAMP%' THEN
+                            'replace_me'
+                         WHEN T.DATA_TYPE = 'VARCHAR2' OR t.data_type = 'CLOB' THEN
+                            '''X'''
+                         WHEN  t.data_type = 'BLOB' THEN
+                            'RAWTOHEX(''Test'')'
+                                         END DATA,
+                          column_name
+                    FROM   USER_TAB_COLUMNS T
+                    WHERE  (T.NULLABLE <> 'Y' OR T.DATA_TYPE = 'DATE' OR T.DATA_TYPE LIKE 'TIMESTAMP%')
+                    AND    TABLE_NAME = I.TABLE_NAME
+                    ORDER  BY COLUMN_ID ASC);
+    
+              BEGIN
+                select partition_name, num_rows
+                into   L_LAST_TURSDAY_PART_NAME, L_NUM_ROWS
+                from (             
+                select * 
+                from   user_tab_partitions
+                where  partition_name not like 'SYS%'
+                  and partition_name like I.PART_PREFIX || '%'
+                  --and last_analyzed is not null
+                  AND TABLE_NAME = I.TABLE_NAME
+                  --and num_rows > 0
+                  AND SUBSTR (partition_name, length(I.PART_PREFIX)+2, 40) <
+                        TO_CHAR (TRUNC ((L_LAST_THURSDAY + (10.5/24)), 'HH'), I.DATE_FORMAT) 
+                order by partition_name desc)
+                where rownum < 2;
+                
+                IF nvl(L_NUM_ROWS,0) = 0 THEN
+                    write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        0,
+                        'Start gathering statistics for table ' || I.TABLE_NAME || ' Partition ' || L_LAST_TURSDAY_PART_NAME || '(LAST TURSDAY PARTITION)'  ,
+                        0
+                       );
+                   
+                    BEGIN
+                        DBMS_STATS.GATHER_TABLE_STATS(user, I.TABLE_NAME, L_LAST_TURSDAY_PART_NAME, force=>true);
+                    EXCEPTION WHEN OTHERS THEN
+                        BEGIN
+                            DBMS_STATS.GATHER_TABLE_STATS(user, I.TABLE_NAME, L_LAST_TURSDAY_PART_NAME, force=>true);
+                        EXCEPTION WHEN OTHERS THEN
+                             write_pm_log (
+                                P_PM_ID,
+                                P_OWNER, 
+                                run_timestamp_start,
+                                v_component,
+                                I.TABLE_NAME,
+                                2021,
+                                'Error gathering statistics for table ' || I.TABLE_NAME || ' Partition ' || L_LAST_TURSDAY_PART_NAME || '. Oracle error: ' || SQLCODE || ':' || SQLERRM,
+                                0
+                             );
+                        END;
+                    END;
+                ELSE
+                    write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        0,
+                        'Statistics exist for table ' || I.TABLE_NAME || ' Partition ' || L_LAST_TURSDAY_PART_NAME || '(LAST TURSDAY PARTITION)'  ,
+                        0
+                       );
+                END IF;
+                
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    L_LAST_TURSDAY_PART_NAME := NULL;
+                    
+                     write_pm_log (
+                        P_PM_ID,
+                        P_OWNER, 
+                        run_timestamp_start,
+                        v_component,
+                        I.TABLE_NAME,
+                        2011,
+                        'There is no partition to copy statistics from for table ' || I.TABLE_NAME || '. ' || log_return_message,
+                        0
+                     );
+                     
+            END;
+            
+            -- For each day from tomorrow up-to SYSDATE + DAYS_AHEAD configured value
+            FOR J IN 0 .. I.DAYS_AHEAD*(1440/I.PERIOD_SIZE) LOOP
+
+                -- create partiton for the time
+                PARTITION_MANAGER.ADD_PARTITION(P_OWNER => P_OWNER,
+                                                P_TABLE => I.TABLE_NAME,
+                                                P_DATE  => TRUNC(SYSDATE) + J*(I.PERIOD_SIZE/1440),
+                                                P_INSERT_STATEMENT => L_INSERT_STATEMENT,
+                                                P_PM_ID => P_PM_ID);
+            END LOOP;
+            
+             run_timestamp_duration_ms   :=
+                CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'Finished adding partitions as ''SYS_...'' . ' ,
+                run_timestamp_duration_ms
+             );
+             
+            run_timestamp_start := SYSTIMESTAMP;
+            
+            -- Get the average size of the last 5 partitions
+            BEGIN
+                SELECT nvl(TRUNC (AVG (bytes) / 1024 / 1024), 5) size_mb
+                  INTO l_avg_size
+                  FROM (  SELECT t.*
+                            FROM user_segments t
+                           WHERE     segment_name = I.TABLE_NAME
+                                 AND SUBSTR (partition_name, length(I.PART_PREFIX)+2, 40) <
+                                        TO_CHAR (TRUNC (SYSDATE), I.DATE_FORMAT)
+                        ORDER BY TO_DATE (SUBSTR (partition_name, length(I.PART_PREFIX)+2, 40), I.DATE_FORMAT) DESC)
+                 WHERE ROWNUM < 6;
+            EXCEPTION
+              WHEN OTHERS THEN
+                l_avg_size := 5;
+            END;
+             
+            l_count_part_renamed := 0;
+            FOR NEW_PARTS IN (select partition_name,
+                                    TO_DATE (
+                                      SUBSTR (REPLACE (high_value, ''' ', ''''),
+                                              INSTR (REPLACE (high_value, ''' ', ''''), '''') + 1,
+                                              16),
+                                      'YYYY-MM-DD HH24:MI') high_value,
+                                      tablespace_name
+                             from    table(return_partitions) 
+                             where   partition_name like 'SYS%'
+                               and   table_name = I.TABLE_NAME) LOOP
+                               
+/*                if I.PARTITION_TABLESPACE_NAME <> NEW_PARTS.tablespace_name then
+                   l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' MOVE PARTITION ' || NEW_PARTS.PARTITION_NAME || ' TABLESPACE ' || I.PARTITION_TABLESPACE_NAME;
+                   execute immediate (l_command);
+                end if; */
+                
+                if NEW_PARTS.high_value < (sysdate + I.DAYS_AHEAD + 7) then
+                    l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' MODIFY PARTITION ' || NEW_PARTS.PARTITION_NAME || 
+                                 ' ALLOCATE EXTENT (SIZE ' || TRUNC((l_avg_size) * NVL(I.GROWTH_FACTOR, 1)) || 'M)';
+                    execute immediate (l_command);
+                end if;
+                
+                l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' MODIFY PARTITION ' || NEW_PARTS.PARTITION_NAME || 
+                             ' STORAGE (NEXT ' || GREATEST(LEAST(TRUNC((l_avg_size) * NVL(I.GROWTH_FACTOR, 1)*0.1), 200), 1) || 'M)';
+                execute immediate (l_command);
+                
+                if nvl(I.keep_in_cache, 'N') = 'Y' 
+                   and NEW_PARTS.high_value < (sysdate + I.DAYS_AHEAD + 7) then
+                    l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' MODIFY PARTITION ' || NEW_PARTS.PARTITION_NAME || 
+                                 ' STORAGE (BUFFER_POOL KEEP)';
+                    execute immediate (l_command);
+                end if;
+                
+                -- If there is a partition for last Thursday or earlier to copy from, copy stats to new partition
+                IF L_LAST_TURSDAY_PART_NAME IS NOT NULL THEN
+                    DBMS_STATS.COPY_TABLE_STATS(OWNNAME     => P_OWNER,
+                                                TABNAME     => I.TABLE_NAME,
+                                                SRCPARTNAME => L_LAST_TURSDAY_PART_NAME,
+                                                DSTPARTNAME => NEW_PARTS.PARTITION_NAME,
+                                                force        => TRUE);
+                                                
+                    DBMS_STATS.LOCK_PARTITION_STATS (
+                        ownname    =>    P_OWNER,
+                        tabname    =>    I.TABLE_NAME,
+                        partname   =>    NEW_PARTS.PARTITION_NAME);
+                END IF;
+                
+                l_command := 'ALTER TABLE ' || I.TABLE_NAME || ' RENAME PARTITION ' || NEW_PARTS.PARTITION_NAME || ' TO ' || I.PART_PREFIX || '_' || TO_CHAR(NEW_PARTS.high_value - (I.PERIOD_SIZE/1440), I.DATE_FORMAT);
+                execute immediate (l_command);
+                
+                l_count_part_renamed := l_count_part_renamed + 1;
+                
+                write_pm_log (
+                    P_PM_ID,
+                    P_OWNER, 
+                    SYSTIMESTAMP,
+                    v_component,
+                    I.TABLE_NAME,
+                    0,
+                    'Partition ' || I.PART_PREFIX || '_' || TO_CHAR(NEW_PARTS.high_value - (I.PERIOD_SIZE/1440), I.DATE_FORMAT) || ' allocated and renamed.',
+                    0 );
+                    
+            END LOOP;
+            
+             run_timestamp_duration_ms   :=
+                CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'Finished renaming partitions. ' || l_count_part_renamed || ' partitions renamed.',
+                run_timestamp_duration_ms );
+                
+            l_avg_size := 1;
+            l_prev_ind_name := 'prev_ind';
+            FOR NEW_IND_PARTS IN (SELECT index_name,
+                                        partition_name,
+                                        TO_DATE (
+                                          SUBSTR (REPLACE (high_value, ''' ', ''''),
+                                                  INSTR (REPLACE (high_value, ''' ', ''''), '''') + 1,
+                                                  16),
+                                          'YYYY-MM-DD HH24:MI') high_value,
+                                          tablespace_name
+                                    FROM table(return_ind_partitions)
+                                   WHERE index_name IN
+                                                (SELECT index_name
+                                                   FROM user_indexes
+                                                  WHERE     table_name = I.TABLE_NAME
+                                                        AND PARTITIONED = 'YES'
+                                                        AND INDEX_TYPE = 'NORMAL')
+                                     AND partition_name LIKE 'SYS%'
+                                ORDER BY index_name, partition_position) LOOP
+                                
+                if l_prev_ind_name <> NEW_IND_PARTS.INDEX_NAME then
+                    -- Get the average size of the last 5 partitions
+                    BEGIN
+                        SELECT nvl(TRUNC (AVG (bytes) / 1024 / 1024), 5) size_mb
+                          INTO l_avg_size
+                          FROM (  SELECT t.*
+                                    FROM user_segments t
+                                   WHERE     segment_name = NEW_IND_PARTS.INDEX_NAME
+                                         AND SUBSTR (partition_name, length(I.PART_PREFIX)+2, 40) <
+                                                TO_CHAR (TRUNC (SYSDATE), I.DATE_FORMAT)
+                                ORDER BY TO_DATE (SUBSTR (partition_name, length(I.PART_PREFIX)+2, 40), I.DATE_FORMAT) DESC)
+                         WHERE ROWNUM < 6;
+                    EXCEPTION
+                      WHEN OTHERS THEN
+                        l_avg_size := 5;
+                    END;
+                    
+                    l_prev_ind_name := NEW_IND_PARTS.INDEX_NAME;
+                end if;
+                
+                -- This section can be deleted after 01/09/2014
+                if l_avg_size > 50 and sysdate < to_date('01/09/2014', 'DD/MM/YYYY') then
+                  l_avg_size := 1;
+                end if;
+                
+/*                -- Move  to tablespace
+                if I.PARTITION_TABLESPACE_NAME <> NEW_IND_PARTS.tablespace_name then
+                   l_command := 'ALTER INDEX ' || NEW_IND_PARTS.INDEX_NAME || ' REBUILD PARTITION ' || NEW_IND_PARTS.PARTITION_NAME || ' TABLESPACE ' || I.PARTITION_TABLESPACE_NAME;
+                   execute immediate (l_command);
+                end if; */
+                
+                -- Allocate the extent
+                l_command := 'ALTER INDEX ' || NEW_IND_PARTS.INDEX_NAME || ' MODIFY PARTITION ' || NEW_IND_PARTS.PARTITION_NAME || 
+                                ' ALLOCATE EXTENT (SIZE ' || TRUNC((l_avg_size) * NVL(I.GROWTH_FACTOR, 1)) || 'M)';
+                execute immediate (l_command);
+                
+                if nvl(I.ind_keep_in_cache, 'N') = 'Y' 
+                   and NEW_IND_PARTS.high_value < (sysdate + I.DAYS_AHEAD + 7) then
+                    l_command := 'ALTER INDEX ' || NEW_IND_PARTS.INDEX_NAME || ' MODIFY PARTITION ' || NEW_IND_PARTS.PARTITION_NAME || 
+                                 ' STORAGE (BUFFER_POOL KEEP)';
+                    execute immediate (l_command);
+                end if;
+                
+                -- rename by convention
+                l_command := 'ALTER INDEX ' || NEW_IND_PARTS.INDEX_NAME || ' RENAME PARTITION ' || NEW_IND_PARTS.PARTITION_NAME || ' TO ' || I.PART_PREFIX || '_' || TO_CHAR(NEW_IND_PARTS.high_value - (I.PERIOD_SIZE/1440), I.DATE_FORMAT);
+                execute immediate (l_command);
+                
+                write_pm_log (
+                    P_PM_ID,
+                    P_OWNER, 
+                    SYSTIMESTAMP,
+                    v_component,
+                    I.TABLE_NAME,
+                    0,
+                    'Partition index ' || NEW_IND_PARTS.INDEX_NAME || '.' || I.PART_PREFIX || '_' || TO_CHAR(NEW_IND_PARTS.high_value - (I.PERIOD_SIZE/1440), I.DATE_FORMAT) || ' allocated and renamed.',
+                    0 );
+                
+            END LOOP;
+            
+            run_timestamp_duration_ms   :=
+                CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'Allocate partitions for table ' || I.TABLE_NAME || ' finished successfully. ' || log_return_message ,
+                run_timestamp_duration_ms );
+                
+          EXCEPTION
+            WHEN OTHERS THEN
+             IF p_return_code = unknown_error
+             THEN
+                log_return_message   :=
+                   'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace();
+             END IF;
+
+             run_timestamp_duration_ms   :=
+                CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+                - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+            write_pm_log (
+                P_PM_ID,
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                2012,
+                'Allocate partitions for table ' || I.TABLE_NAME || ' finished with errors. ' || log_return_message ||
+                '. Last command: ' || l_command ,
+                run_timestamp_duration_ms
+             );
+          END;
+          
+          run_timestamp_duration_ms   :=
+                    CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (table_run_timestamp_start);
+                    
+          write_pm_log (
+            P_PM_ID,
+            P_OWNER, 
+            table_run_timestamp_start,
+            v_component,
+            I.TABLE_NAME,
+            0,
+            'Allocate partitions finished successfully. ',
+            run_timestamp_duration_ms
+           );
+        END LOOP;
+        
+        rebuild_unusable_indexes(p_pm_id);
+        
+        check_tablespaces(p_pm_id);
+        
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+        
+    EXCEPTION
+      WHEN OTHERS
+      THEN
+
+         IF p_return_code = unknown_error
+         THEN
+            log_return_message   :=
+               'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace();
+         END IF;
+
+         run_timestamp_duration_ms   :=
+            CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP)
+            - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+
+         write_pm_log (
+            P_PM_ID,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            null,
+            1999,
+            'ALLOCATE_PARTITIONS_FOR_SCHEMA finished with errors. ' || log_return_message,
+            run_timestamp_duration_ms
+         );
+         
+         DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END ALLOCATE_PARTITIONS_FOR_SCHEMA;
+
+    -- Not in use
+    --  Gets the name of the partitioning key for table
+    FUNCTION GET_PARTITION_COLUMN(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2) RETURN VARCHAR2 IS
+        L_RETURNVAL USER_PART_KEY_COLUMNS.COLUMN_NAME%TYPE;
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'GET_PARTITION_COLUMN';
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        SELECT T.COLUMN_NAME
+        INTO   L_RETURNVAL
+        FROM   DBA_PART_KEY_COLUMNS T
+        WHERE  T.OWNER = P_OWNER
+        AND    T.NAME = P_TABLE_NAME;
+
+        RETURN L_RETURNVAL;
+        
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+            RAISE_APPLICATION_ERROR(-20001,
+                                                            'Table ' || P_OWNER || '.' || P_TABLE_NAME || ' is not partitioned');
+    END GET_PARTITION_COLUMN;
+
+    PROCEDURE ADD_PARTITION(P_OWNER IN VARCHAR2, P_TABLE IN VARCHAR2, P_DATE IN DATE, P_INSERT_STATEMENT VARCHAR2, P_PM_ID IN NUMBER DEFAULT 0) IS
+        L_INSERT_STATEMENT VARCHAR2(32767);
+        L_FULL_TABLE_NAME  VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'ADD_PARTITION';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+    
+        L_INSERT_STATEMENT := replace (P_INSERT_STATEMENT, 'replace_me', 'to_date(''' || TO_CHAR(P_DATE, 'dd/mm/yyyy') || ''',''dd/mm/yyyy'')');
+        
+        SELECT replace (P_INSERT_STATEMENT, 'replace_me', 'to_date(''' || TO_CHAR(P_DATE, 'dd/mm/yyyy hh24:mi') || ''',''dd/mm/yyyy hh24:mi'')')
+        INTO   L_INSERT_STATEMENT
+        FROM   DUAL;
+        
+        PARTITION_MANAGER.write_pm_log (
+            P_PM_ID,
+            P_OWNER, 
+            run_timestamp_start,
+            v_component,
+            P_TABLE,
+            success,
+            'Adding partition for ' || TO_CHAR(P_DATE, 'dd/mm/yyyy hh24:mi') || '. INSERT_STATEMENT: ' || L_INSERT_STATEMENT,
+            0
+         );
+                 
+        EXECUTE IMMEDIATE L_INSERT_STATEMENT;
+        ROLLBACK;
+
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+
+    END ADD_PARTITION;
+
+   PROCEDURE analysis  (P_PM_ID IN NUMBER DEFAULT 0)
+   IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'analysis';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+   BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+        
+        write_pm_log (
+            P_PM_ID,
+            user, 
+            run_timestamp_start,
+            v_component,
+            '',
+            0,
+            'Start analyze partitions.'  ,
+            0
+           );
+           
+            FOR part
+            IN ( select table_name, partition_name 
+                   from user_tab_partitions 
+                  where table_name in ( SELECT TABLE_NAME
+                                        FROM   PARTITION_DEFINITIONS T
+                                        WHERE  STATUS = 1
+                                        AND    OWNER = user)
+                    and num_rows IS NULL)
+            LOOP
+              DBMS_STATS.GATHER_TABLE_STATS(user, part.table_name, part.partition_name, 1);
+            END LOOP;
+
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+        PARTITION_MANAGER.write_pm_log (
+            P_PM_ID,
+            user, 
+            run_timestamp_start,
+            v_component,
+            null,
+            success,
+            'Analyze partitions finished successfully.',
+            run_timestamp_duration_ms
+         );
+         
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+   EXCEPTION
+     WHEN OTHERS THEN
+       DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+   END analysis;
+   
+   PROCEDURE rebuild_unusable_indexes  (P_PM_ID IN NUMBER DEFAULT 0)
+   IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'rebuild_unusable_indexes';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+      count_ind_rebuilt              NUMBER := 0;
+      count_real_ind_rebuilt      NUMBER := 0;
+      count_prt_ind_rebuilt          NUMBER := 0;
+      l_command                         VARCHAR2 (4000) := '...';
+      l_retrun_code                  NUMBER := 0;
+      l_should_rebuild              NUMBER;
+   BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        write_pm_log (
+            P_PM_ID,
+            user, 
+            run_timestamp_start,
+            v_component,
+            '',
+            0,
+            'Start ' || v_component  ,
+            0
+           );
+           
+        -- rebuild unusable index partitions ...
+        FOR curr
+        IN (SELECT    'alter index ' || index_name    || ' rebuild partition ' || partition_name ||' parallel 8' cmd
+                FROM user_ind_partitions
+               WHERE status <> 'USABLE') LOOP
+             l_command := curr.cmd;         
+             execute immediate (l_command);
+             
+             count_prt_ind_rebuilt := count_prt_ind_rebuilt + 1;
+        END LOOP;
+        
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+        PARTITION_MANAGER.write_pm_log (
+            P_PM_ID,
+            user, 
+            run_timestamp_start,
+            v_component,
+            null,
+            count_prt_ind_rebuilt,
+            count_prt_ind_rebuilt || ' index partitions rebuilt.',
+            run_timestamp_duration_ms
+         );
+
+         
+        FOR I IN (SELECT TABLE_NAME
+                    FROM   PARTITION_DEFINITIONS T
+                    WHERE  STATUS = 1
+                    AND    OWNER = user
+                    AND    upd_global_ind = 'N'
+                    AND    (to_char(sysdate,'D') in ('1', '7') or (to_char(sysdate,'D') = '6' and to_number(to_char(sysdate,'HH24')) > 19))
+                    ORDER  BY ORDER_IN_PROCESS) LOOP
+            run_timestamp_start := SYSTIMESTAMP;
+            count_real_ind_rebuilt := 0;
+            
+            FOR curr IN (SELECT 'alter index ' || index_name || ' rebuild parallel 8' cmd,
+                                'alter index ' || index_name || ' parallel 1' cmd2
+                         FROM user_indexes
+                        WHERE status = 'UNUSABLE'
+                          AND table_name = I.TABLE_NAME) LOOP
+                l_command := curr.cmd;         
+                execute immediate (l_command);
+                
+                l_command := curr.cmd2;         
+                execute immediate (l_command);
+                
+                count_real_ind_rebuilt := count_real_ind_rebuilt + 1;
+            END LOOP;
+
+            run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            PARTITION_MANAGER.write_pm_log (
+                P_PM_ID,
+                user, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                count_real_ind_rebuilt || ' indexes rebuilt. ',
+                run_timestamp_duration_ms
+             );
+             
+        END LOOP;
+            
+         
+         -- rebuild rest unusable indexes ...
+        FOR curr IN (SELECT 'alter index ' || index_name || ' rebuild parallel 8' cmd,
+                            table_name,
+                            'alter index ' || index_name || ' parallel 1' cmd2
+                     FROM user_indexes
+                    WHERE status = 'UNUSABLE') LOOP
+            run_timestamp_start := SYSTIMESTAMP;
+            
+            l_command := curr.cmd;         
+            execute immediate (l_command);
+            
+            l_command := curr.cmd2;         
+            execute immediate (l_command);
+
+            run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            PARTITION_MANAGER.write_pm_log (
+                P_PM_ID,
+                user, 
+                run_timestamp_start,
+                v_component,
+                null,
+                2020,
+                'Index rebuilt. Should not be unusable. ' || l_command ,
+                run_timestamp_duration_ms
+             );
+            
+        END LOOP;
+        
+
+         
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+   END rebuild_unusable_indexes;
+
+   PROCEDURE check_tablespaces (P_PM_ID IN NUMBER DEFAULT 0) 
+   IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'check_tablespaces';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+   BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+
+        FOR curr
+        IN (
+            select table_name, count(*) cnt 
+            from user_tab_partitions utp
+            where table_name in(select table_name 
+                                from partition_definitions pd
+                                where owner = user
+                                and   utp.tablespace_name <> pd.partition_tablespace_name
+                                )
+            group by table_name) LOOP
+            
+            PARTITION_MANAGER.write_pm_log (
+                P_PM_ID,
+                user, 
+                run_timestamp_start,
+                v_component,
+                null,
+                2016,
+                'Table ' || curr.table_name || ' - There are ' || curr.cnt || ' partitions in the wrong tablespace.',
+                run_timestamp_duration_ms
+             );
+             
+        END LOOP;
+        
+        FOR curr
+        IN (
+            select index_name from user_indexes ui
+            where index_name not like '%SYS%' and
+                  table_name in(select table_name 
+                                from partition_definitions pd
+                                where owner = user
+                                and   ui.tablespace_name <> pd.partition_tablespace_name
+                                )) LOOP
+            
+            PARTITION_MANAGER.write_pm_log (
+                P_PM_ID,
+                user, 
+                run_timestamp_start,
+                v_component,
+                null,
+                2017,
+                'Index ' || curr.index_name || ' is in the wrong tablespace.',
+                run_timestamp_duration_ms
+             );
+             
+        END LOOP;                    
+               
+        FOR curr
+        IN (               
+            select uip.index_name, count(*) cnt
+            from   user_ind_partitions uip,
+                   user_indexes ui
+            where  uip.index_name not like '%SYS%' 
+              and  uip.index_name = ui.index_name
+              and  ui.table_name in (select pd.table_name 
+                                    from partition_definitions pd
+                                    where owner = user
+                                    and   uip.tablespace_name <> pd.partition_tablespace_name
+                                    )
+            group by uip.index_name) LOOP
+            
+            PARTITION_MANAGER.write_pm_log (
+                P_PM_ID,
+                user, 
+                run_timestamp_start,
+                v_component,
+                null,
+                2018,
+                'Index ' || curr.index_name || ' - There are ' || curr.cnt || ' partitions in the wrong tablespace.',
+                run_timestamp_duration_ms
+             );
+             
+        END LOOP;                       
+
+        
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+        PARTITION_MANAGER.write_pm_log (
+            P_PM_ID,
+            user, 
+            run_timestamp_start,
+            v_component,
+            null,
+            success,
+            'check_tablespaces finished successfully. ' ,
+            run_timestamp_duration_ms
+         );
+         
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+   END check_tablespaces;
+   
+   PROCEDURE write_pm_log      (p_pm_id                   NUMBER,
+                                p_schema_name           VARCHAR2,
+                                p_operation_time       timestamp,
+                                p_component            VARCHAR2,
+                                p_table_name           VARCHAR2,
+                                p_return_code          NUMBER,
+                                p_return_message       VARCHAR2,
+                                p_total_time_ms        NUMBER)
+   IS
+      PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+      INSERT INTO PARTITION_MANAGER_LOG (
+                               ID,
+                               SCHEMA_NAME,
+                               operation_time,
+                               component,
+                               table_name,
+                               return_code,
+                               return_message,
+                               total_time_ms)
+        VALUES   (p_pm_id,
+                  p_schema_name,
+                  p_operation_time,
+                  p_component,
+                  p_table_name,
+                  p_return_code,
+                  substr(p_return_message,1,2000),
+                  p_total_time_ms);
+        
+      COMMIT;
+   END write_pm_log;
+   
+  -- helper function to get LONG type high_value column from dba_tab_partitions
+  FUNCTION LONG_COLUMN(P_QUERY IN VARCHAR2, P_FIRST_BIND IN VARCHAR2,
+                       P_FIRST_BIND_VALUE IN VARCHAR2, P_SECOND_BIND IN VARCHAR2,
+                       P_SECOND_BIND_VALUE IN VARCHAR2, P_THIRD_BIND IN VARCHAR2,
+                       P_THIRD_BIND_VALUE IN VARCHAR2) RETURN VARCHAR2 AS
+    L_CURSOR       INTEGER DEFAULT DBMS_SQL.OPEN_CURSOR;
+    L_N            NUMBER;
+    L_LONG_VAL     CLOB;
+    L_LONG_PIECE   CLOB;
+    L_LONG_LEN     NUMBER;
+    L_BUFLEN       NUMBER := 32760;
+    L_CURPOS       NUMBER := 0;
+    L_RETURN_VALUE NUMBER;
+  BEGIN
+    DBMS_SQL.PARSE(L_CURSOR, P_QUERY, DBMS_SQL.NATIVE);
+
+    DBMS_SQL.BIND_VARIABLE(L_CURSOR, P_FIRST_BIND, P_FIRST_BIND_VALUE);
+    DBMS_SQL.BIND_VARIABLE(L_CURSOR, P_SECOND_BIND, P_SECOND_BIND_VALUE);
+
+    DBMS_SQL.BIND_VARIABLE(L_CURSOR, P_THIRD_BIND, P_THIRD_BIND_VALUE);
+
+    DBMS_SQL.DEFINE_COLUMN_LONG(L_CURSOR, 1);
+    L_N := DBMS_SQL.EXECUTE(L_CURSOR);
+
+    IF (DBMS_SQL.FETCH_ROWS(L_CURSOR) > 0) THEN
+      LOOP
+        DBMS_SQL.COLUMN_VALUE_LONG(L_CURSOR, 1, L_BUFLEN, L_CURPOS, L_LONG_VAL, L_LONG_LEN);
+        L_CURPOS       := L_CURPOS + L_LONG_LEN;
+        L_RETURN_VALUE := NVL(L_RETURN_VALUE, 0) + L_LONG_LEN;
+
+        EXIT WHEN L_LONG_LEN = 0;
+
+        L_LONG_PIECE := L_LONG_PIECE || L_LONG_VAL; -- added
+
+      END LOOP;
+    END IF;
+    DBMS_SQL.CLOSE_CURSOR(L_CURSOR); -- added
+
+    RETURN L_LONG_PIECE;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF DBMS_SQL.IS_OPEN(L_CURSOR) THEN
+        DBMS_SQL.CLOSE_CURSOR(L_CURSOR);
+      END IF;
+      RAISE;
+  END LONG_COLUMN;
+
+    -- Moves partitions for a date range from source table to destination table using a temporary table
+    PROCEDURE MOVE_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_SOURCE_TABLE VARCHAR2,
+                                                                            P_TEMP_TABLE VARCHAR2, P_DEST_TABLE VARCHAR2, P_FROM IN DATE,
+                                                                            P_TO IN DATE) IS
+        TRUNC_FROM               DATE;
+        TRUNC_TO                 DATE;
+        NUM_DAYS                 NUMBER;
+        L_DUMMY                  NUMBER;
+        L_PARTITION_COLUMN       VARCHAR2(30) := GET_PARTITION_COLUMN(P_OWNER      => P_OWNER,
+                                                                                                                                    P_TABLE_NAME => P_DEST_TABLE);
+        L_FULL_SOURCE_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_SOURCE_TABLE;
+        L_FULL_TEMP_TABLE_NAME   VARCHAR2(61) := P_OWNER || '.' || P_TEMP_TABLE;
+        L_FULL_DEST_TABLE_NAME   VARCHAR2(61) := P_OWNER || '.' || P_DEST_TABLE;
+    BEGIN
+
+        TRUNC_FROM := TRUNC(P_FROM);
+        TRUNC_TO   := TRUNC(P_TO);
+
+        NUM_DAYS := TRUNC_TO - TRUNC_FROM;
+
+        -- Check if rows exist for specified dates in destination table
+        -- and raise error if exist
+        FOR I IN 0 .. NUM_DAYS LOOP
+
+            BEGIN
+                EXECUTE IMMEDIATE 'SELECT 1 FROM ' || L_FULL_DEST_TABLE_NAME || ' where ' ||
+                                                    L_PARTITION_COLUMN || ' between :1 and :2 + 1 and rownum < 2'
+                    INTO L_DUMMY
+                    USING TRUNC_FROM + I, TRUNC_FROM + I;
+                RAISE_APPLICATION_ERROR(-20000,
+                                                                'Found rows in both destination table ' || L_FULL_DEST_TABLE_NAME ||
+                                                                ' for date ' || TO_CHAR(TRUNC_FROM + I, 'dd/mm/yyyy'));
+
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    NULL;
+            END;
+
+        END LOOP;
+
+        -- for each day
+        FOR I IN 0 .. NUM_DAYS LOOP
+
+            -- try to create partition for current day in dest table by inserting a dummy row FROM SOURCE TABLE.
+            -- the ADD_PARTITION procedure is not used to avoid creating partitions for empty dates in source table
+            EXECUTE IMMEDIATE 'INSERT INTO ' || L_FULL_DEST_TABLE_NAME || '
+                                SELECT *
+                                FROM   ' || L_FULL_SOURCE_TABLE_NAME || '
+                                WHERE  ' || L_PARTITION_COLUMN || ' BETWEEN :1 AND :2 + 1
+                                AND    ROWNUM < 2'
+                USING TRUNC_FROM + I, TRUNC_FROM + I;
+
+            -- if partition was created (row inserted into dest table)
+            IF SQL%ROWCOUNT > 0 THEN
+
+                -- rollback insert
+                ROLLBACK;
+
+                -- exchange source partition with temp table
+                EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_SOURCE_TABLE_NAME ||
+                                                    ' exchange PARTITION FOR (to_date(''' ||
+                                                    TO_CHAR(TRUNC_FROM + I, 'dd/mm/yyyy') ||
+                                                    ''',''dd/mm/yyyy'') ) WITH TABLE ' || L_FULL_TEMP_TABLE_NAME ||
+                                                    ' INCLUDING INDEXES WITHOUT VALIDATION update indexes';
+
+                -- exchange destiniation partition with temp table
+                EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_DEST_TABLE_NAME ||
+                                                    ' exchange PARTITION FOR (to_date(''' ||
+                                                    TO_CHAR(TRUNC_FROM + I, 'dd/mm/yyyy') ||
+                                                    ''',''dd/mm/yyyy'') ) WITH TABLE ' || L_FULL_TEMP_TABLE_NAME ||
+                                                    ' INCLUDING INDEXES WITHOUT VALIDATION update indexes';
+
+                -- drop partition from source table
+                EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_SOURCE_TABLE_NAME ||
+                                                    ' DROP PARTITION FOR (to_date(''' ||
+                                                    TO_CHAR(TRUNC_FROM + I, 'dd/mm/yyyy') ||
+                                                    ''',''dd/mm/yyyy'') )  update indexes';
+            END IF;
+
+        END LOOP;
+        COMMIT;
+    END MOVE_PARTITIONS_FOR_DATES;
+
+    PROCEDURE DROP_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_TABLE VARCHAR2, P_FROM IN DATE,
+                                                                            P_TO IN DATE) IS
+        TRUNC_FROM        DATE;
+        TRUNC_TO          DATE;
+        NUM_DAYS          NUMBER;
+        L_TABLESPACE_NAME VARCHAR2(30);
+        L_FULL_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+    BEGIN
+        TRUNC_FROM := TRUNC(P_FROM);
+        TRUNC_TO   := TRUNC(P_TO);
+
+        NUM_DAYS := TRUNC_TO - TRUNC_FROM;
+
+        -- FOR EACH DAY
+        FOR I IN 0 .. NUM_DAYS LOOP
+
+            -- Get tablespace name (if partition exists)
+            IF EXISTS_PARTITION(P_OWNER, P_TABLE, TRUNC_FROM + I) THEN
+
+                BEGIN
+                    SELECT TABLESPACE_NAME
+                    INTO   L_TABLESPACE_NAME
+                    FROM   DBA_TAB_PARTITIONS T
+                    WHERE  T.TABLE_OWNER = P_OWNER
+                    AND    T.TABLE_NAME = P_TABLE
+                    AND    T.PARTITION_NAME = GET_PARTITION_NAME(P_OWNER, P_TABLE, TRUNC_FROM + I);
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        L_TABLESPACE_NAME := NULL;
+                END;
+
+            END IF;
+
+            -- Drop the partition and ignore if partition is missing
+            BEGIN
+
+        log_manager.write_to_log_table(p_app_name=>'PARTITION_MANAGER',p_message_type => 0, p_message => 'Dropping partition for date ' || to_char(TRUNC_FROM + I,'dd/mm/yyyy') || ' on table ' || P_TABLE );
+                EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME || ' DROP PARTITION FOR (to_date(''' ||
+                                                    TO_CHAR(TRUNC_FROM + I, 'dd/mm/yyyy') ||
+                                                    ''',''dd/mm/yyyy'') ) update indexes';
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF SQLCODE = -14758 OR SQLCODE = -02149 /* no partition for this date */
+                     THEN
+                        NULL;
+                    ELSE
+                        RAISE;
+                    END IF;
+            END;
+        END LOOP;
+    END DROP_PARTITIONS_FOR_DATES;
+
+    FUNCTION CONVERT_TIMESTAMP_TO_VARCHAR(P_TIMESTAMP IN TIMESTAMP) RETURN VARCHAR2 DETERMINISTIC IS
+    BEGIN
+        RETURN 'TIMESTAMP'' ' || TO_CHAR(TRUNC(P_TIMESTAMP), 'yyyy-mm-dd hh24:mi:ss') || '''';
+    END CONVERT_TIMESTAMP_TO_VARCHAR;
+    
+    FUNCTION EXISTS_PARTITION(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+        RETURN BOOLEAN IS
+        DUMMY  NUMBER;
+        L_DATE VARCHAR2(100) := CONVERT_TIMESTAMP_TO_VARCHAR(P_DATE + 1);
+    BEGIN
+        SELECT 1
+        INTO   DUMMY
+        FROM   DBA_TAB_PARTITIONS T
+        WHERE  LONG_COLUMN(P_QUERY             => 'select high_value from dba_tab_partitions t where t.table_name=:table_name and partition_name = :partition_name and table_owner = :table_owner',
+                                             P_FIRST_BIND        => ':table_name',
+                                             P_FIRST_BIND_VALUE  => T.TABLE_NAME,
+                                             P_SECOND_BIND       => ':partition_name',
+                                             P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+                                             P_THIRD_BIND        => ':table_owner',
+                                             P_THIRD_BIND_VALUE  => T.TABLE_OWNER) = L_DATE
+
+        AND    T.TABLE_NAME = P_TABLE_NAME
+        AND    T.TABLE_OWNER = P_OWNER;
+        RETURN TRUE;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN FALSE;
+    END EXISTS_PARTITION;
+
+    FUNCTION GET_PARTITION_NAME(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+        RETURN VARCHAR2 IS
+        L_RETURNVAL  VARCHAR2(1000);
+        L_TIME_STAMP VARCHAR2(100) := CONVERT_TIMESTAMP_TO_VARCHAR(P_DATE + 1);
+    BEGIN
+        SELECT T.PARTITION_NAME
+        INTO   L_RETURNVAL
+        FROM   DBA_TAB_PARTITIONS T
+        WHERE  LONG_COLUMN(P_QUERY             => 'select high_value from dba_tab_partitions t where t.table_name=:table_name and partition_name = :partition_name and table_owner = :table_owner',
+                                             P_FIRST_BIND        => ':table_name',
+                                             P_FIRST_BIND_VALUE  => T.TABLE_NAME,
+                                             P_SECOND_BIND       => ':partition_name',
+                                             P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+                                             P_THIRD_BIND        => ':table_owner',
+                                             P_THIRD_BIND_VALUE  => T.TABLE_OWNER) = L_TIME_STAMP
+
+        AND    T.TABLE_NAME = P_TABLE_NAME
+        AND    T.TABLE_OWNER = P_OWNER;
+        RETURN L_RETURNVAL;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RAISE_APPLICATION_ERROR(-20003,
+                                                            'No partition for date ' || TO_CHAR(P_DATE, 'yyyy-mm-dd') ||
+                                                            ' in table ' || P_OWNER || '.' || P_TABLE_NAME);
+        WHEN OTHERS THEN
+            RAISE;
+    END GET_PARTITION_NAME;
+
+    
+   PROCEDURE initialize
+   IS
+   BEGIN
+     SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') 
+     INTO   schema_name
+     FROM   DUAL;
+   END initialize;
+   
+BEGIN
+   initialize;
+END PARTITION_MANAGER;
+/

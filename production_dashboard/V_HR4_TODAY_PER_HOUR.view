@@ -1,0 +1,10 @@
+CREATE OR REPLACE FORCE VIEW V_HR4_TODAY_PER_HOUR AS
+SELECT  
+    to_char(TRUNC (created_date,'HH24'),'HH24:MI') TIME, 
+    COUNT (*) NOES
+FROM V_HR4_TRADES
+WHERE created_date >= TRUNC (SYSDATE)
+GROUP BY TRUNC (created_date,'HH24')
+ORDER BY TRUNC (created_date,'HH24')
+;
+comment on table V_HR4_TODAY_PER_HOUR is 'Harmony 4: This view sums trades per hour from the beginning of the day (00:00 )';

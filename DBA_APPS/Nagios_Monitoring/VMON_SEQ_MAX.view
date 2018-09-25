@@ -1,0 +1,37 @@
+CREATE OR REPLACE FORCE VIEW DBA_APPS.VMON_SEQ_MAX
+(
+   SEQUENCE_OWNER,
+   SEQUENCE_NAME,
+   MIN_VALUE,
+   MAX_VALUE,
+   INCREMENT_BY,
+   CYCLE_FLAG,
+   ORDER_FLAG,
+   CACHE_SIZE,
+   LAST_NUMBER,
+   "Remain_num",
+   "Pct",
+   STATUS
+)
+AS
+   SELECT s."SEQUENCE_OWNER",
+          s."SEQUENCE_NAME",
+          s."MIN_VALUE",
+          s."MAX_VALUE",
+          s."INCREMENT_BY",
+          s."CYCLE_FLAG",
+          s."ORDER_FLAG",
+          s."CACHE_SIZE",
+          s."LAST_NUMBER",
+          (max_value - last_number) "Remain_num",
+          ROUND (last_number / max_value, 2) * 100 "Pct",
+          CASE
+             WHEN last_number / max_value * 100 > 90 THEN 'CRITICAL'
+             ELSE 'WARNING'
+          END
+             "STATUS"
+     FROM dba_sequences s
+    WHERE     ( ( (max_value - min_value) * 80 / 100 <
+                    (last_number - min_value)))
+          AND max_value > 0
+          AND last_number != 1;

@@ -1,0 +1,2 @@
+include=package,view,procedure,function,sequence,java
+include=TABLE:"IN (select table_name from user_tables where temporary='Y')"

@@ -1,0 +1,10 @@
+CREATE OR REPLACE FORCE VIEW V_HR4_1H_FLOW_BY_MIN AS
+SELECT  
+    to_char(TRUNC (created_date,'MI'),'HH24:MI') TIME, 
+    COUNT (*) NOES
+FROM V_HR4_TRADES
+WHERE created_date > trunc(SYSDATE,'MI')-59/1440
+GROUP BY TRUNC (created_date,'MI')
+ORDER BY TRUNC (created_date,'MI')
+;
+comment on table V_HR4_1H_FLOW_BY_MIN is 'Harmony 4: This view sums trades per min for the last hour.';

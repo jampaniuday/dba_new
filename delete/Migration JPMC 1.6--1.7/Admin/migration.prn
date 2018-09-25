@@ -1,0 +1,79 @@
+TYPE            TABLENAME                              IDFIELD       SEQVAL
+STATIC          A_ACCOUNT                              ID              1,100,001
+STATIC          A_INSTRUMENT                           ID              1,000,519
+STATIC          A_OBJECT_2_OBJECT                      ID              1,100,013
+STATIC          A_OBJECT_ROLE                          ID              1,100,031
+STATIC          A_ORGANIZATION                         ID              1,100,001
+STATIC          A_PERSON                               ID              1,100,000
+STATIC          A_STATE                                ID              1,100,006
+STATIC          A_STATE_DETAIL                         STATE_ID        1,100,006
+STATIC          ARCH_ADDRESS                           ID              1,000,300
+PURE            ARCH_ALERT_EVENT
+STATIC          ARCH_ANOMALY_DETECTOR                  ID              1,000,000
+PURE            ARCH_AUTHORIZATION_DEF
+PURE            ARCH_AUTHORIZATION_RELATION
+PURE            ARCH_BATCH_DIRECT
+PURE            ARCH_BATCH_PARAM
+PURE            ARCH_BILLING_FUNCTION
+PURE            ARCH_CODE_GROUP
+PURE            ARCH_CODE_MEMBER
+PURE            ARCH_CORE_REPORT
+PURE            ARCH_CREDIT_LINE_2_UCM
+PURE            ARCH_CREDIT_POS_CALL_2_POS_COM
+PURE            ARCH_CREDIT_POS_CALL_2_UCM
+PURE            ARCH_CREDIT_UCM
+STATIC          ARCH_DATA_MAPPING                      ID              1,200,043
+STATIC          ARCH_DL                                ID              1,100,006
+STATIC          ARCH_DL_DETAIL                         ID              1,100,006
+PURE            ARCH_EVENT
+STATIC          ARCH_EVENT_2_DL                        ID              1,100,006
+PURE            ARCH_EVENT_GROUP
+PURE            ARCH_FILTER
+PURE            ARCH_FLOW_DEF
+PURE            ARCH_GENERIC_REQUEST_DEALS
+PURE            ARCH_LOG_MESSAGES
+PURE            ARCH_LOG_MSG_DEVISION
+PURE            ARCH_MSG_GROUP_DETAIL
+PURE            ARCH_MSG_LOGIC_INFO
+PURE            ARCH_MSG_PROTOCOL_INFO
+PURE            ARCH_MSG_TOKEN
+STATIC          ARCH_NAMER                             ID              1,100,001
+PURE            ARCH_NOTIFICATION
+PURE            ARCH_OBJ_PROP_DEF
+PURE            ARCH_OBJ_PROP_GROUP_DEF
+PURE            ARCH_OBJ_PROP_META_GROUP_DEF
+STATIC          ARCH_OBJECT_PROPS                      ID              1,000,230
+STATIC          ARCH_PARTNER                           ID              1,005,000
+STATIC          ARCH_PARTNER_2_MSG_GROUP               PARTNER_ID      1,001,010
+PURE            ARCH_RECON
+PURE            ARCH_RECON_DEF
+PURE            ARCH_RECON_DETAIL
+PURE            ARCH_RECON_EXP
+PURE            ARCH_REPORT
+PURE            ARCH_REPORT_2_RECEIVER
+PURE            ARCH_REPORT_COLUMN
+STATIC          ARCH_REPORT_DL_2_RCVR                  DL_DETAIL_ID    1,000,001
+PURE            ARCH_REPORT_INSTANCE
+PURE            ARCH_RULE_PROJECT
+PURE            ARCH_RULE_RULE
+PURE            ARCH_RULE_RULESET
+PURE            ARCH_VAL_FUNCTION_PARAM
+PURE            ARCH_VAL_MARKET_FUNCTION
+PURE            ARCH_VAL_SOURCE_DATA
+PURE            ARCH_VAL_SOURCE_DATA_TYPE
+PURE            ARCH_WEB_JSP_PAGES
+PURE            ARCH_WEB_PAGE_PART
+PURE            ARCH_WEB_URI
+RULE            DATA.SQL
+PURE            FXPB_CUT_OFF_TIMES
+PURE            FXPB_DEFAULT_CCY_PAIRS
+PURE            FXPB_ORG_ROLE_2_EVENT
+PURE            FXPB_PREDEFINED_QUERIES
+DEVSTATICDATA   MINIMAL.SQL
+REPORT          OPTION_NOE_BLOTTER_REPORT.SQL
+REPORT          OPTION_NOE_DEALS_REPORT.SQL
+REPORT          OPTION_POSITION_DETAILS_REPORT.SQL
+REPORT          OPTION_SUPECT_REPORT.SQL
+PURE            S_TRANSITION
+PURE            S_TRANSITION_STATE
+PURE            TEMP_FUNDS

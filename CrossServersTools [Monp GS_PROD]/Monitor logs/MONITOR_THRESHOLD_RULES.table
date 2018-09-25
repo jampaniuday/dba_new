@@ -1,0 +1,65 @@
+CREATE TABLE MONITOR_THRESHOLD_RULES
+(
+  ID                            NUMBER,
+  SYSTEM_TYPE                   VARCHAR2(30 BYTE) NOT NULL,
+  EFFECTED_PROCEDURE            VARCHAR2(30 BYTE) NOT NULL,
+  METRIC_TYPE                   VARCHAR2(30 BYTE) NOT NULL,
+  ALERT_LEVEL                   VARCHAR2(1 BYTE) NOT NULL,
+  MONTH_CONSECUTIVE_TO_CHECK    NUMBER,
+  MONTHLY_ALERT_PRECENTAGE      NUMBER,
+  MONTHLY_THRESHOLD_ALERT_DAYS  NUMBER,
+  MONTHLY_THRESHOLD_ALERT       NUMBER,
+  SINGLE_CONSECUTIVE_TO_CHECK   NUMBER,
+  SINGLE_ALERT_PRECENTAGE       NUMBER,
+  SINGLE_THRESHOLD_ALERT_DAYS   NUMBER,
+  SINGLE_THRESHOLD_ALERT        NUMBER,
+  ACTIVE_STATUS                 NUMBER(1)       NOT NULL,
+  PUBLISH_ALERT                 NUMBER(1)       DEFAULT 0
+);
+
+
+--  There is no statement for index GS_PROD.SYS_C001762691.
+--  The object is created when the parent object is created.
+
+CREATE OR REPLACE TRIGGER Thershold_seq 
+BEFORE INSERT ON MONITOR_THRESHOLD_RULES 
+FOR EACH ROW
+BEGIN
+  SELECT MONITOR_ALL_SEQ.nextval
+  INTO   :new.id
+  FROM   dual;
+END;
+/
+
+
+ALTER TABLE MONITOR_THRESHOLD_RULES ADD (
+  CONSTRAINT MONITOR_CHECK_THRESHOLDS
+  CHECK (effected_procedure in ('DATA_MANAGER','GATHER_STATISTICS','PARTITION_MANAGER','NEPTUNE','ALL'))
+  ENABLE VALIDATE,
+  CHECK (system_type in ('PROD','UAT'))
+  ENABLE VALIDATE,
+  CHECK (Metric_type in ('TIME','SPEED'))
+  ENABLE VALIDATE,
+  CHECK (Alert_level in ('W','I','E'))
+  ENABLE VALIDATE,
+  CHECK (month_consecutive_to_check > 0)
+  ENABLE VALIDATE,
+  CHECK (monthly_alert_precentage > 0)
+  ENABLE VALIDATE,
+  CHECK (monthly_threshold_alert_days > 0)
+  ENABLE VALIDATE,
+  CHECK (monthly_threshold_alert > 0)
+  ENABLE VALIDATE,
+  CHECK (single_consecutive_to_check > 0)
+  ENABLE VALIDATE,
+  CHECK (single_alert_precentage >= 0)
+  ENABLE VALIDATE,
+  CHECK (single_threshold_alert_days > 0)
+  ENABLE VALIDATE,
+  CHECK (single_threshold_alert > 0)
+  ENABLE VALIDATE,
+  CHECK (Active_status in ('0','1'))
+  ENABLE VALIDATE,
+  PRIMARY KEY
+  (ID)
+  ENABLE VALIDATE);

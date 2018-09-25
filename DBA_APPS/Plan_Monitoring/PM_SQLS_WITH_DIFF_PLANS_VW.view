@@ -1,0 +1,40 @@
+create or replace force view PM_SQLS_WITH_DIFF_PLANS_VW as
+select * from 
+(
+select SCHEMA_NAME,
+       SQL_ID,
+       PLAN_HASH_VALUE,
+       0 IS_NEW,
+	   0 IS_REJECTED,
+       EXECUTIONS,
+       AVG_ELA_TIME_SEC,
+       AVG_ROWS_PROCESSED,
+       AVG_BUFFER_GETS,
+       AVG_DISK_READS,
+       MODULE,
+       ACTION,
+	   STATS_START_TIME,
+	   STATS_END_TIME
+from   PM_PLANS
+where  (SCHEMA_NAME, SQL_ID) in (select SCHEMA_NAME, SQL_ID from PM_DIFF_PLANS)
+union all
+select SCHEMA_NAME,
+       SQL_ID,
+       PLAN_HASH_VALUE,
+       1 IS_NEW,
+	   Nvl((select 1 from PM_REJECTED_PLANS where SCHEMA_NAME = P.SCHEMA_NAME and SQL_ID = P.SQL_ID and PLAN_HASH_VALUE = P.PLAN_HASH_VALUE), 0) IS_REJECTED,
+       EXECUTIONS,
+       AVG_ELA_TIME_SEC,
+       AVG_ROWS_PROCESSED,
+       AVG_BUFFER_GETS,
+       AVG_DISK_READS,
+       MODULE,
+       ACTION,
+	   STATS_START_TIME,
+	   STATS_END_TIME
+from   PM_DIFF_PLANS P
+)
+order by SCHEMA_NAME,
+         SQL_ID,
+         IS_NEW
+/  

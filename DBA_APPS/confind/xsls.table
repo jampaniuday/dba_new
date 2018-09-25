@@ -1,0 +1,6 @@
+CREATE TABLE XSLS
+(	
+  ID   NUMBER(30),
+  XSL  CLOB
+);
+

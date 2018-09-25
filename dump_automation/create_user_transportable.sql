@@ -1,0 +1,36 @@
+set define "^"
+set echo on
+set heading on
+set feedback on
+set sqlblank on
+set sqlprefix off
+set timing on
+set time on 
+set serveroutput on
+
+spool create_user_transportable.log
+
+define DUMP_ID=^1
+define DATA_FILES_DIRECTORY=^2
+
+define DUMP_SCHEMA=DMP_^DUMP_ID
+define DEFAULT_TABLESPACE=TBS_STATIC_^DUMP_ID
+define DATAFILE_STATIC=^DATA_FILES_DIRECTORY.static_^DUMP_ID..dbf
+define QIN_TABLESPACE=TBS_QIN_^1
+define DATAFILE_QIN=^DATA_FILES_DIRECTORY.qin_^DUMP_ID..dbf
+
+
+CREATE BIGFILE TABLESPACE ^DEFAULT_TABLESPACE  DATAFILE 
+  '^DATAFILE_STATIC' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+
+CREATE BIGFILE TABLESPACE ^QIN_TABLESPACE  DATAFILE 
+  '^DATAFILE_QIN' SIZE 100M AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+
+
+CREATE USER ^DUMP_SCHEMA IDENTIFIED BY ^DUMP_SCHEMA
+  default tablespace ^DEFAULT_TABLESPACE;
+GRANT CONNECT,RESOURCE TO ^DUMP_SCHEMA;
+grant unlimited tablespace to AUTOMATION_REPO;
+
+spool off
+exit;

@@ -1,0 +1,6 @@
+create sequence PARTITION_MANAGER_LOG_SEQ increment by 1 start with 1 nocache nocycle
+/
+grant select on PARTITION_MANAGER_LOG_SEQ to PUBLIC
+/
+create or replace public synonym PARTITION_MANAGER_LOG_SEQ  for PARTITION_MANAGER_LOG_SEQ 
+/

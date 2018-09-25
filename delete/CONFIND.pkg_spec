@@ -1,0 +1,7 @@
+CREATE OR REPLACE package CONFIND is
+
+   PROCEDURE get_data;
+   PROCEDURE post_data;
+
+end CONFIND;
+/

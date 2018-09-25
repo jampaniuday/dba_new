@@ -1,0 +1,59 @@
+CREATE TABLE LOG
+(
+  SCHEMA          VARCHAR2(60),
+  APP             VARCHAR2(200),
+  TIME_STAMP      TIMESTAMP default systimestamp not null,
+  MESSAGE         VARCHAR2(4000),
+  COUNTER         NUMBER,
+  MESSAGE_TYPE    NUMBER(2)
+)
+/
+
+
+create index log_time on log (time_stamp)
+/
+create index log_type on log (MESSAGE_TYPE)
+/
+COMMENT ON COLUMN LOG.MESSAGE_TYPE IS '0 - Info, 1 - Warning, 2 - Error, 10 - Reviewed Warning, 20 - Reviewed Error'
+/
+
+GRANT SELECT ON LOG TO PUBLIC
+/
+GRANT INSERT ON LOG TO PUBLIC
+/
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM LOG FOR LOG';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+CREATE OR REPLACE FORCE VIEW V_MON_DBA_LOG AS 
+select 
+	MESSAGE_TYPE, 
+	schema, 
+	APP, 
+	MESSAGE, 
+	TIME_STAMP
+from  LOG
+where MESSAGE_TYPE in (1,2)
+  and time_stamp>trunc(sysdate-7)
+UNION ALL
+select 
+	2, 
+	schema, 
+	APP, 
+	'Run was not finished!', 
+	TIME_STAMP
+from  LOG L
+where upper(MESSAGE) = 'START'
+  and TIME_STAMP BETWEEN trunc(sysdate-7) and (systimestamp - 16/24) 
+  and not exists (select 1
+                  from  LOG
+                  where SCHEMA = L.SCHEMA
+                    and APP = L.APP
+                    and TIME_STAMP >= L.TIME_STAMP
+                    and upper(MESSAGE) = 'END')
+order by time_stamp desc;

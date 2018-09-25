@@ -1,0 +1,27 @@
+CREATE TABLE KILLS_LOG (log_time       timestamp DEFAULT SYSTIMESTAMP,
+                        MESSAGE        VARCHAR2 (150),
+                        SID            NUMBER,
+                        SERIAL#        NUMBER,
+                        USERNAME       VARCHAR2 (30),
+                        OSUSER         VARCHAR2 (30),
+                        MACHINE        VARCHAR2 (64),
+                        TERMINAL       VARCHAR2 (30),
+                        PROGRAM        VARCHAR2 (48),
+                        SQL_ID         VARCHAR2 (13),
+                        MODULE         VARCHAR2 (48),
+                        CLIENT_INFO    VARCHAR2 (64),
+                        SERVICE_NAME   VARCHAR2 (64),
+                        sql_text       CLOB)
+/						
+
+GRANT SELECT ON KILLS_LOG TO PUBLIC
+/
+GRANT INSERT ON KILLS_LOG TO PUBLIC
+/
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM KILLS_LOG FOR KILLS_LOG';
+exception
+  when OTHERS then
+    null;
+end;
+/						

@@ -1,0 +1,39 @@
+
+CREATE OR REPLACE TYPE ind_part_type
+AS
+   OBJECT (index_name VARCHAR2 (30),
+           partition_name VARCHAR2 (30),
+           high_value VARCHAR2(4000),
+           num_rows NUMBER,
+           compression VARCHAR2 (8),
+           last_analyzed DATE,
+		   tablespace_name VARCHAR2 (40),
+		   partition_position number);
+/
+
+CREATE OR REPLACE TYPE ind_part_table AS TABLE OF ind_part_type;
+/
+
+CREATE OR REPLACE FUNCTION return_ind_partitions
+   RETURN ind_part_table
+   PIPELINED
+ AUTHID CURRENT_USER 
+IS
+   r   ind_part_type;
+BEGIN
+   FOR f IN (SELECT   * FROM user_ind_partitions)
+   LOOP
+      r :=
+         ind_part_type (f.index_name,
+                        f.partition_name,
+                        f.high_value,
+                        f.num_rows,
+                        f.compression,
+                        f.last_analyzed,
+						f.tablespace_name,
+						f.partition_position);
+      PIPE ROW (r);
+   END LOOP;
+END;
+/
+

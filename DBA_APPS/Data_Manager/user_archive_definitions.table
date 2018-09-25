@@ -1,0 +1,55 @@
+CREATE TABLE user_archive_definitions
+(
+TABLE_NAME 				VARCHAR2(30) not NULL ,
+DEST_TABLE_NAME 		VARCHAR2(30),
+RETENTION				number(30) not null,
+ARCHIVE_COLUMN 			VARCHAR2(30) not null,
+ORDER_IN_PROCESS 		number(10) not null,
+PARTITIONED 			number(1) default 0 not null,
+TIME_LIMIT  			NUMBER(10) DEFAULT 180 NOT NULL,
+LOGGING_INTERVAL  		NUMBER(10) DEFAULT 60 NOT NULL,
+ADDITIONAL_CONDITION 	VARCHAR2(1000) DEFAULT '1=1',
+SLEEP 					number(10) default 0 not null,
+CHUNK_SIZE 				number(10) default 50000 not null,
+HINT 					varchar2(1000),
+STATUS 					NUMBER(1) DEFAULT 0 NOT NULL,
+--VIEW_NAME             	VARCHAR2(40),
+RECREATE_MV_LOG			varchar2(1) default 'N',
+NEPTUNE_GROUP_ID 		number
+);
+
+comment on column user_archive_definitions.TABLE_NAME is 'source table name';
+comment on column user_archive_definitions.DEST_TABLE_NAME is 'destination table name. use "NEPTUNE" if destination is new pluto. Use "DROP/DELETE" if records should be deleted.';
+comment on column user_archive_definitions.ARCHIVE_COLUMN is 'Archive column (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.PARTITIONED is '0 - no, 1 - yes';
+comment on column user_archive_definitions.HINT is 'optional hint (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.TIME_LIMIT is 'Time limit (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.LOGGING_INTERVAL is 'Logging interval (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.ADDITIONAL_CONDITION is 'Additional conditions (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.ORDER_IN_PROCESS is 'table order in archive processes per owner';
+comment on column user_archive_definitions.SLEEP is 'sleep in seconds (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.CHUNK_SIZE is 'chunk size (relevent only for non-partitioned tables)';
+comment on column user_archive_definitions.STATUS is '1 - active, 0 - inactive';
+comment on column user_archive_definitions.RETENTION is 'Days to keep in table';
+
+
+CREATE UNIQUE INDEX UAD_OWNER_TABLE_UK ON user_archive_definitions(TABLE_NAME);
+CREATE UNIQUE INDEX UAD_OWNER_ORDER_UK ON user_archive_definitions(ORDER_IN_PROCESS);
+
+
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_STATUS CHECK (STATUS IN(0,1,2));
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_PARTITIONED CHECK (PARTITIONED IN(0,1));
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_LOGGING_INTERVAL CHECK (LOGGING_INTERVAL >=1);
+
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_CHUNK_SIZE CHECK (CHUNK_SIZE >=1);
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_SLEEP CHECK (SLEEP >=0);
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_MV_LOG CHECK (RECREATE_MV_LOG IN('Y','N'));
+
+ALTER TABLE user_archive_definitions ADD CONSTRAINT UAD_CHK_NEPTUNE_VIEW CHECK (NOT(NEPTUNE_GROUP_ID IS NULL and DEST_TABLE_NAME = 'NEPTUNE'));
+
+grant insert, update, delete on user_archive_definitions to DBA_APPS;
+
+grant select on user_archive_definitions to public;
+
+grant select on user_archive_definitions to dba_apps with grant option;
+

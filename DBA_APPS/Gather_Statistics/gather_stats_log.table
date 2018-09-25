@@ -1,0 +1,63 @@
+DECLARE
+
+v_vercheck number;
+
+BEGIN
+
+--SAFE_UPGRADE.DROP_TABLE(P_TABLE_NAME =>'GATHER_STATS_LOG');
+
+select count(1) 
+into v_vercheck
+from dba_tab_partitions
+where table_name = 'MSG_QUEUE_IN'
+and rownum <2;
+
+IF v_vercheck = 1 THEN
+
+execute immediate 'CREATE TABLE gather_stats_log 
+(RUN_ID NUMBER NOT NULL,
+EXECUTING_PRODECURE VARCHAR2(30) NOT NULL,
+OWNER VARCHAR2(30) NOT NULL,
+OBJECT_NAME VARCHAR2(30),
+OBJECT_TYPE          VARCHAR2(30),
+TOTAL_TIME_MS        NUMBER(30) NOT NULL,
+BEGIN_TIME_STAMP     TIMESTAMP(6) NOT NULL,
+END_TIME_STAMP       TIMESTAMP(6) NOT NULL,
+SIZE_MB              NUMBER,
+FIELDS_NUMBER        NUMBER,
+INDEXES_NUMBER       NUMBER,
+END_STATUS           VARCHAR2(100),
+FAILED_STATUS VARCHAR2(10))
+PARTITION BY RANGE (BEGIN_TIME_STAMP) 
+INTERVAL(NUMTOYMINTERVAL(1, ''MONTH'')) 
+(  
+   PARTITION gather_stats_log1 VALUES LESS THAN (TO_DATE(''1-5-2015'', ''DD-MM-YYYY'')),
+   PARTITION gather_stats_log2 VALUES LESS THAN (TO_DATE(''1-6-2015'', ''DD-MM-YYYY'')) 
+)';
+
+execute immediate 'CREATE INDEX gather_stats_log_id_idx ON gather_stats_log (RUN_ID) local';
+execute immediate 'CREATE INDEX gather_stats_log_owner_idx ON gather_stats_log (OWNER,OBJECT_NAME,END_STATUS) local';
+
+ELSE
+
+execute immediate 'CREATE TABLE gather_stats_log 
+(RUN_ID NUMBER NOT NULL,
+EXECUTING_PRODECURE VARCHAR2(30) NOT NULL,
+OWNER VARCHAR2(30) NOT NULL,
+OBJECT_NAME VARCHAR2(30),
+OBJECT_TYPE          VARCHAR2(30),
+TOTAL_TIME_MS        NUMBER(30) NOT NULL,
+BEGIN_TIME_STAMP     TIMESTAMP(6) NOT NULL,
+END_TIME_STAMP       TIMESTAMP(6) NOT NULL,
+SIZE_MB              NUMBER,
+FIELDS_NUMBER        NUMBER,
+INDEXES_NUMBER       NUMBER,
+END_STATUS           VARCHAR2(100),
+FAILED_STATUS VARCHAR2(10))';
+
+execute immediate 'CREATE INDEX gather_stats_log_id_idx ON gather_stats_log (RUN_ID)';
+execute immediate 'CREATE INDEX gather_stats_log_owner_idx ON gather_stats_log (OWNER,OBJECT_NAME,END_STATUS)';
+
+END IF;
+END;
+/

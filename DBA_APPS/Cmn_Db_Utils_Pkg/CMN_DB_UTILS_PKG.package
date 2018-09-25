@@ -1,0 +1,296 @@
+CREATE OR REPLACE PACKAGE DBA_APPS.CMN_DB_UTILS_PKG AUTHID CURRENT_USER AS
+
+-------------------------------------------------------------
+
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'CMN_DB_UTILS_PKG';
+  VERSION    CONSTANT VARCHAR2(30) := '1.3';
+
+-- compile all invalid objects in schema.
+PROCEDURE COMPILE_SCHEMA;
+-------------------------------------------------------------------
+-- version return function
+FUNCTION FUNC_VERSION return VARCHAR2;
+
+-------------------------------------------------------------------
+PROCEDURE alterFKsReferringTable(
+    pAction     IN      VARCHAR2,
+    pTable      IN      VARCHAR2,
+    pOwner      IN      VARCHAR2    DEFAULT USER
+);
+-------------------------------------------------------------------
+PROCEDURE alterTableFKs(
+    pAction     IN      VARCHAR2,
+    pTable      IN      VARCHAR2,
+    pOwner      IN      VARCHAR2    DEFAULT USER
+) ;
+-------------------------------------------------------------------
+PROCEDURE advanceSequenceByTable(
+    pSequenceName   IN  VARCHAR2,
+    pTableName      IN  VARCHAR2,
+    pTableField     IN  VARCHAR2
+) ;
+-------------------------------------------------------------------
+FUNCTION BLOB2CLOB(
+    pSourceBlob      IN BLOB
+) RETURN CLOB ;
+-------------------------------------------------------------------
+FUNCTION timestamp2num (
+    val TIMESTAMP
+) RETURN NUMBER;
+
+END CMN_DB_UTILS_PKG;
+/
+
+
+CREATE OR REPLACE PACKAGE BODY CMN_DB_UTILS_PKG AS
+-------------------------------------------------------------------
+PROCEDURE COMPILE_SCHEMA AS
+
+BEGIN
+
+DBMS_OUTPUT.ENABLE (buffer_size => NULL);
+
+  FOR cur_rec IN (SELECT owner,
+                         object_name,
+                         object_type
+                  FROM   dba_objects
+                  WHERE  object_type IN ('VIEW','SYNONYM', 'PROCEDURE','FUNCTION','TRIGGER')
+                  AND    status != 'VALID'
+                  and owner = user)
+
+  LOOP
+
+  BEGIN
+  EXECUTE IMMEDIATE 'ALTER ' || cur_rec.object_type ||
+            ' "' || cur_rec.owner || '"."' || cur_rec.object_name || '" COMPILE';
+
+    EXCEPTION
+      WHEN OTHERS THEN
+        DBMS_OUTPUT.put_line(cur_rec.object_type || ' : ' || cur_rec.owner ||
+                             ' : ' || cur_rec.object_name);
+    END;
+  END LOOP;
+
+-- compile package and package body.
+
+BEGIN
+  FOR cur_rec IN (SELECT owner,
+                         object_name,
+                         object_type,
+                         DECODE(object_type, 'PACKAGE', 1,
+                                             'PACKAGE BODY', 2, 2) AS recompile_order
+                  FROM   dba_objects
+                  WHERE  object_type IN ('PACKAGE', 'PACKAGE BODY')
+                  AND    status != 'VALID'
+                  and    owner = user
+                  ORDER BY 4)
+  LOOP
+    BEGIN
+      IF cur_rec.object_type = 'PACKAGE' THEN
+        EXECUTE IMMEDIATE 'ALTER ' || cur_rec.object_type ||
+            ' "' || cur_rec.owner || '"."' || cur_rec.object_name || '" COMPILE';
+      ElSE
+        EXECUTE IMMEDIATE 'ALTER PACKAGE "' || cur_rec.owner ||
+            '"."' || cur_rec.object_name || '" COMPILE BODY';
+      END IF;
+    EXCEPTION
+      WHEN OTHERS THEN
+        DBMS_OUTPUT.put_line(cur_rec.object_type || ' : ' || cur_rec.owner ||
+                             ' : ' || cur_rec.object_name);
+    END;
+  END LOOP;
+END;
+
+END COMPILE_SCHEMA;
+
+
+
+FUNCTION FUNC_VERSION return VARCHAR2
+is
+begin
+return VERSION;
+end FUNC_VERSION;
+
+PROCEDURE alterFKsReferringTable(
+    pAction     IN      VARCHAR2,
+    pTable      IN      VARCHAR2,
+    pOwner      IN      VARCHAR2    DEFAULT USER
+) AS
+
+    CURSOR FKList (
+            lpOwner  IN VARCHAR2,
+            lpTable  IN VARCHAR2,
+            lpAction IN VARCHAR2
+    ) IS
+        -- Generate 'ALTER TABLE table_name DISABLE/ENABLE  CONSTRAINT' SQLs
+        SELECT  'ALTER TABLE '|| FK.OWNER || '.' || FK.TABLE_NAME || ' ' || lpAction || ' CONSTRAINT ' || FK.CONSTRAINT_NAME AS alterFK
+        FROM    DBA_CONSTRAINTS FK
+        WHERE   FK.CONSTRAINT_TYPE='R'
+          AND   FK.OWNER = pOwner
+          AND   FK.R_CONSTRAINT_NAME in (
+                                        SELECT FK2.CONSTRAINT_NAME
+                                        FROM   DBA_CONSTRAINTS FK2
+                                        WHERE  FK2.TABLE_NAME = lpTable
+                                          AND  FK2.OWNER = pOwner
+                                          AND  FK2.CONSTRAINT_TYPE IN ('U','P'))
+        ORDER BY 1;
+    -- END CURSOR FKList
+
+    lStatus     VARCHAR2(10) := NULL;
+
+BEGIN /*alterFKsReferringTable*/
+
+    CASE
+        WHEN ((upper(pAction))='ENABLE')   THEN     lStatus :=   'ENABLED';
+        WHEN ((upper(pAction))='DISABLE')  THEN     lStatus :=   'DISABLED';
+    END CASE ;
+
+    FOR FKs IN FKList (upper(pOwner), upper(pTable), upper(pAction))
+    LOOP /* FKs */
+        BEGIN /* alter FK */
+            EXECUTE IMMEDIATE FKs.alterFK;
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+        END /* alter FK */ ;
+    END LOOP /* FKs */;
+
+END alterFKsReferringTable ;
+-------------------------------------------------------------------
+PROCEDURE alterTableFKs(
+    pAction     IN      VARCHAR2,
+    pTable      IN      VARCHAR2,
+    pOwner      IN      VARCHAR2    DEFAULT USER
+) AS
+
+    CURSOR FKList (
+            lpOwner  IN VARCHAR2,
+            lpTable  IN VARCHAR2,
+            lpAction IN VARCHAR2
+    ) IS
+        -- Generate 'ALTER TABLE table_name DISABLE/ENABLE  CONSTRAINT' SQLs
+        SELECT  'ALTER TABLE '|| FK.OWNER || '.' || FK.TABLE_NAME|| ' ' || lpAction || ' CONSTRAINT ' || FK.CONSTRAINT_NAME AS alterFK
+        FROM    DBA_CONSTRAINTS FK
+        WHERE   FK.CONSTRAINT_TYPE='R'
+          AND   FK.OWNER = pOwner
+          AND   FK.TABLE_NAME LIKE lpTable
+        ORDER BY 1;
+    -- END CURSOR FKList
+
+    lStatus     VARCHAR2(10) := NULL;
+
+BEGIN /*alterTableFKs*/
+
+    CASE
+        WHEN ((upper(pAction))='ENABLE')   THEN     lStatus :=   'ENABLED';
+        WHEN ((upper(pAction))='DISABLE')  THEN     lStatus :=   'DISABLED';
+    END CASE ;
+
+    FOR FKs IN FKList (upper(pOwner), upper(pTable), upper(pAction))
+    LOOP /* FKs */
+        BEGIN /* alter FK */
+            EXECUTE IMMEDIATE FKs.alterFK;
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
+        END /* alter FK */ ;
+    END LOOP /* FKs */;
+
+END alterTableFKs ;
+-------------------------------------------------------------------
+PROCEDURE advanceSequenceByTable(
+    pSequenceName   IN  VARCHAR2,
+    pTableName      IN  VARCHAR2,
+    pTableField     IN  VARCHAR2
+) AS
+
+    lTableVal       NUMBER;
+    lSequenceVal    NUMBER;
+    lCurrSeqVal     NUMBER;
+    lSeqIncrement   NUMBER;
+    lCache          NUMBER;
+    lSQL            varchar2(200);
+
+
+BEGIN
+
+    -- Get sequence last number
+    SELECT INCREMENT_BY, CACHE_SIZE into lSeqIncrement, lCache
+    from user_sequences
+    where sequence_name=upper(pSequenceName);
+
+    EXECUTE IMMEDIATE 'select '||pSequenceName||'.nextval from dual' into lSequenceVal;
+
+    -- Get tables max value, set to seq val if table empty to skip loop.
+    BEGIN
+        lSQL := 'SELECT MAX('|| pTableField ||') FROM '||pTableName;
+        EXECUTE IMMEDIATE lSQL INTO lTableVal;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN lTableVal := lSequenceVal;
+    END;
+
+    IF (lTableVal>lSequenceVal) THEN
+        DBMS_OUTPUT.PUT_LINE('ALTER SEQUENCE '||pSequenceName||' INCREMENT BY '||to_char(lTableVal-lSequenceVal) ||' nocache');
+        EXECUTE IMMEDIATE    'ALTER SEQUENCE '||pSequenceName||' INCREMENT BY '||to_char(lTableVal-lSequenceVal) ||' nocache';
+        EXECUTE IMMEDIATE    'SELECT '        ||pSequenceName||'.NEXTVAL FROM DUAL ' into lCurrSeqVal ;
+        DBMS_OUTPUT.PUT_LINE('SELECT '        ||pSequenceName||'.NEXTVAL FROM DUAL '||lCurrSeqVal);
+        EXECUTE IMMEDIATE    'ALTER SEQUENCE '||pSequenceName||' INCREMENT BY '||lSeqIncrement;
+        DBMS_OUTPUT.PUT_LINE('ALTER SEQUENCE '||pSequenceName||' INCREMENT BY '||lSeqIncrement);
+        IF (lCache>0) THEN
+            EXECUTE IMMEDIATE 'ALTER SEQUENCE  '|| pSequenceName ||' CACHE '||lCache;
+        END IF ;
+    END IF;
+
+
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20000, pSequenceName||' ::Sequence does not exist.', TRUE);
+    WHEN OTHERS THEN RAISE;
+END advanceSequenceByTable;
+-------------------------------------------------------------------
+FUNCTION BLOB2CLOB(
+    pSourceBlob      IN BLOB
+) RETURN CLOB AS
+
+    -- DBMS_LOB CONVERT parameters
+    lClob clob;
+    lDestOffsset integer := 1;
+    lSrcOffsset integer := 1;
+    lCurrenntLangCTX integer := dbms_lob.default_lang_ctx;
+    lWarning integer;
+
+
+BEGIN
+
+    IF (pSourceBlob is not null) THEN
+        lDestOffsset := 1;
+        lSrcOffsset := 1;
+        dbms_lob.CREATETEMPORARY(lClob, true);
+        dbms_lob.converttoclob(
+            dest_lob    => lClob,
+            src_blob    => pSourceBlob,
+            amount      => dbms_lob.lobmaxsize,
+            dest_offset => lDestOffsset,
+            src_offset  => lSrcOffsset,
+            blob_csid   => dbms_lob.default_csid,
+            lang_context=> lCurrenntLangCTX,
+            warning     => lWarning
+        );
+    ELSE
+        lClob := NULL;
+    END IF;
+
+    RETURN(lClob);
+
+END BLOB2CLOB ;
+-------------------------------------------------------------------
+FUNCTION timestamp2num (
+val TIMESTAMP
+) RETURN NUMBER
+AS
+BEGIN
+   RETURN TO_NUMBER (TO_DATE (TO_CHAR (val, 'dd/mm/yyyy hh24:mi:ss'), 'dd/mm/yyyy hh24:mi:ss') - TO_DATE ('01-01-1970', 'DD-MM-YYYY')) * (24 * 60 * 60 * 1000) + TO_CHAR (val, 'ff3');
+END timestamp2num;
+-------------------------------------------------------------------
+END CMN_DB_UTILS_PKG;
+/

@@ -1,0 +1,77 @@
+CREATE TABLE archive_definitions 
+(
+OWNER VARCHAR2(30) not NULL,
+TABLE_NAME VARCHAR2(30) not NULL ,
+DEST_TABLE_NAME VARCHAR2(30),
+RETENTION number(30) not null,
+DAYS_AHEAD number(30) not null,
+ARCHIVE_COLUMN VARCHAR2(30) not null,
+ORDER_IN_PROCESS number(10) not null,
+PARTITION_TABLESPACE_NAME VARCHAR2(30) DEFAULT 'USERS' NOT NULL,
+PARTITIONED number(1) default 0 not null,
+TIME_LIMIT  NUMBER(10) DEFAULT 180 NOT NULL,
+LOGGING_INTERVAL  NUMBER(10) DEFAULT 60 NOT NULL,
+ADDITIONAL_CONDITION VARCHAR2(1000) DEFAULT '1=1',
+SLEEP number(10) default 0 not null,
+CHUNK_SIZE number(10) default 50000 not null,
+HINT varchar2(1000),
+STATUS NUMBER(1) DEFAULT 0 NOT NULL,
+VALIDATION		VARCHAR2(4000),
+PERIOD_SIZE		NUMBER(10),
+DATE_FORMAT		VARCHAR2(40),
+CRON_EXPR		VARCHAR2(40),
+GROWTH_FACTOR	NUMBER 		DEFAULT 0.95 NOT NULL,
+PART_PREFIX		VARCHAR2(10)
+);
+
+comment on column ARCHIVE_DEFINITIONS.TABLE_NAME is 'source table name';
+comment on column ARCHIVE_DEFINITIONS.DEST_TABLE_NAME is 'destination table name. use "NEPTUNE" if destination is new pluto. Use "DROP/DELETE" if records should be deleted.';
+comment on column ARCHIVE_DEFINITIONS.RETENTION is 'Days to keep in table';
+comment on column ARCHIVE_DEFINITIONS.DAYS_AHEAD is 'Days to prepare ahead (relevent only for partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.PARTITION_TABLESPACE_NAME is 'Tablespace for newly created partitions (relevent only for partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.ARCHIVE_COLUMN is 'Archive column (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.PARTITIONED is '0 - no, 1 - yes';
+comment on column ARCHIVE_DEFINITIONS.HINT is 'optional hint (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.TIME_LIMIT is 'Time limit (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.LOGGING_INTERVAL is 'Logging interval (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.ADDITIONAL_CONDITION is 'Additional conditions (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.ORDER_IN_PROCESS is 'table order in archive processes per owner';
+comment on column ARCHIVE_DEFINITIONS.SLEEP is 'sleep in seconds (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.CHUNK_SIZE is 'chunk size (relevent only for non-partitioned tables)';
+comment on column ARCHIVE_DEFINITIONS.STATUS is '1 - active, 0 - inactive';
+comment on column ARCHIVE_DEFINITIONS.VALIDATION is 'condition for drop partitions';
+comment on column ARCHIVE_DEFINITIONS.PERIOD_SIZE is 'partition period size';
+comment on column ARCHIVE_DEFINITIONS.DATE_FORMAT is 'partition name date format';
+comment on column ARCHIVE_DEFINITIONS.CRON_EXPR is 'crontab';
+comment on column ARCHIVE_DEFINITIONS.GROWTH_FACTOR is 'next partition size';
+comment on column ARCHIVE_DEFINITIONS.PART_PREFIX is 'partition prefix';
+
+
+
+CREATE UNIQUE INDEX AD_OWNER_TABLE_UK ON ARCHIVE_DEFINITIONS(OWNER,TABLE_NAME);
+CREATE UNIQUE INDEX AD_OWNER_ORDER_UK ON ARCHIVE_DEFINITIONS(OWNER,ORDER_IN_PROCESS);
+
+
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_STATUS CHECK (STATUS IN(0,1));
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_PARTITIONED CHECK (PARTITIONED IN(0,1));
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_LOGGING_INTERVAL CHECK (LOGGING_INTERVAL >=1);
+
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_CHUNK_SIZE CHECK (CHUNK_SIZE >=1);
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_SLEEP CHECK (SLEEP >=0);
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_retention CHECK (retention >=1);
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_days_ahead CHECK (days_ahead >=0);
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_PERIOD_SIZE CHECK (1440/PERIOD_SIZE = trunc(1440/PERIOD_SIZE, 5));
+ALTER TABLE archive_definitions ADD CONSTRAINT CHK_GROWTH_FACTOR CHECK (GROWTH_FACTOR >0 and GROWTH_FACTOR <=1);
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM 	archive_definitions FOR archive_definitions';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+
+GRANT SELECT ON archive_definitions TO PUBLIC;
+
+

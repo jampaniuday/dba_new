@@ -1,0 +1,129 @@
+CREATE OR REPLACE PACKAGE Move_Tables AUTHID CURRENT_USER AS
+-- The package manages the procedure of moving tables and rebuilding indexes.
+-- --------------------------------------------------------------------------
+  
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'Move_Tables';
+  VERSION    CONSTANT VARCHAR2(30) := '3.0';
+
+  -- The main procedure.
+  PROCEDURE Run(P_ID in number default NULL);
+END Move_Tables;
+/
+
+
+
+
+
+
+CREATE OR REPLACE PACKAGE BODY Move_Tables AS
+
+  v_errm      VARCHAR2(200);
+
+  PROCEDURE Run(P_ID in number default NULL) IS
+    C_APP_NAME CONSTANT VARCHAR2(30) := 'Move_Tables' || '[ID:' || P_ID || ']';
+  BEGIN
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'START', null, Log_Manager.Msg_Type_Info);
+
+    -- Running over all the tables that should be moved.
+    for r_table_to_move in (select OWNER,
+                                   TABLE_NAME,
+                                   IS_MOVE_LOBS,
+                                   IS_REBUILD_INDEXES,
+                                   IS_GATHER_STATS
+                            from   TABLES_TO_MOVE
+                            where  (P_ID is not NULL and ID = P_ID) or P_ID is NULL
+                            order by ORDER_SEQUENCE asc) loop
+      BEGIN
+          Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Moving table ' || r_table_to_move.OWNER || '.' || r_table_to_move.TABLE_NAME, null, Log_Manager.Msg_Type_Info);
+          execute immediate 'alter table ' || r_table_to_move.OWNER || '.' || r_table_to_move.TABLE_NAME || ' move';
+
+          -- Moving LOBs 
+          if r_table_to_move.IS_MOVE_LOBS = 1 then
+            for r_lob_to_move in (select COLUMN_NAME,
+                                         TABLESPACE_NAME
+                                  from   ALL_LOBS
+                                  where  OWNER      = r_table_to_move.OWNER
+                                    and  TABLE_NAME = r_table_to_move.TABLE_NAME) loop
+              begin
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Moving lob ' || r_lob_to_move.COLUMN_NAME, null, Log_Manager.Msg_Type_Info);
+                execute immediate 'alter table ' || r_table_to_move.OWNER || '.' || r_table_to_move.TABLE_NAME || ' move lob (' || r_lob_to_move.COLUMN_NAME || ') store as(tablespace ' || r_lob_to_move.TABLESPACE_NAME || ')';
+              exception
+                when OTHERS then
+                  v_errm := SUBSTR(SQLERRM, 1 , 200);
+                  Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+              end;
+            end loop;
+          end if;
+
+          -- Rebuilding indexes
+          if r_table_to_move.IS_REBUILD_INDEXES = 1 then
+            for r_index_to_rebuild in (select INDEX_NAME
+                                       from   DBA_INDEXES
+                                       where  OWNER      = r_table_to_move.OWNER    
+                                         and  TABLE_NAME = r_table_to_move.TABLE_NAME 
+                                         and  STATUS     = 'UNUSABLE') loop
+              begin
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Rebuilding index ' || r_index_to_rebuild.INDEX_NAME, null, Log_Manager.Msg_Type_Info); 
+                execute immediate 'alter index ' || r_table_to_move.OWNER || '.' || r_index_to_rebuild.INDEX_NAME || ' rebuild';
+              exception
+                when OTHERS then
+                  v_errm := SUBSTR(SQLERRM, 1 , 200);
+                  Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);  
+              end;
+            end loop; 
+          end if;
+ 
+          -- Gathering stats
+          if r_table_to_move.IS_GATHER_STATS = 1 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Gathering stats', null, Log_Manager.Msg_Type_Info);
+            Gather_Statistics.Tables(P_Schema_Name => r_table_to_move.OWNER,
+                                     P_Table_Name  => r_table_to_move.TABLE_NAME);
+          end if;
+
+          update TABLES_TO_MOVE
+          set    LAST_MOVE_DATE = SYSDATE
+          where  OWNER = r_table_to_move.OWNER
+            and  TABLE_NAME = r_table_to_move.TABLE_NAME;
+
+          commit;
+      EXCEPTION
+        when OTHERS then
+          v_errm := SUBSTR(SQLERRM, 1 , 200);
+          Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);  
+      END;
+    end loop;
+
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'END', null, Log_Manager.Msg_Type_Info);
+  EXCEPTION
+    when OTHERS then
+     v_errm := SUBSTR(SQLERRM, 1 , 200);
+     Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+     Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'END', null, Log_Manager.Msg_Type_Info);
+  END;
+END Move_Tables;
+/
+
+GRANT EXECUTE ON Move_Tables TO PUBLIC
+/
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM MOVE_TABLES FOR Move_Tables';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+BEGIN
+  delete VERSIONS
+  where  COMPONENT_NAME = Move_Tables.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values (Move_Tables.C_APP_NAME,
+			          Move_Tables.VERSION,
+					  SYSDATE);
+  commit;
+END;
+/

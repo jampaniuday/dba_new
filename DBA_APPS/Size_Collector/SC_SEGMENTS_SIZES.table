@@ -1,0 +1,25 @@
+create table SC_SEGMENTS_SIZES
+(
+  SCHEMA_NAME         varchar2(60) not null,
+  CAPTURE_TIME        date         not null,
+  SEGMENT_NAME        varchar2(60) not null,
+  SEGMENT_TYPE        varchar2(60) not null,
+  TABLE_NAME          varchar2(60) not null,
+  SIZE_MB             number       not null,
+  EST_NUM_OF_ROWS     number,
+  EST_AVG_ROW_SIZE_MB number,
+  IS_LAST_CAPTURE     number(1)    not null,
+  constraint SC_SEGMENTS_SIZES_PK primary key (SCHEMA_NAME, 
+                                               CAPTURE_TIME, 
+									           SEGMENT_NAME,
+									           SEGMENT_TYPE)
+)
+/
+
+create index SC_SEGMENTS_SIZES_IDX1 on SC_SEGMENTS_SIZES
+(TABLE_NAME, SCHEMA_NAME, CAPTURE_TIME)
+/
+
+create index SC_SEGMENTS_SIZES_IDX2 on SC_SEGMENTS_SIZES
+(IS_LAST_CAPTURE)
+/

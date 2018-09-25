@@ -1,0 +1,326 @@
+CREATE OR REPLACE PACKAGE REFRASH_ACTIVE_APP_LIST_PKG AS
+-- manage the ACTIVE_APP_LIST table.
+
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'REFRASH_ACTIVE_APP_LIST_PKG';
+  VERSION       CONSTANT VARCHAR2(30) := '1.0';
+
+ -- Gather info from db_links and populate active_app_list table
+  PROCEDURE REFRASH_ACTIVE_APP_LIST (last_alive_time IN DATE DEFAULT SYSDATE-7 );
+
+ -- validate db_links and log any discard into active_app_list_discards
+  PROCEDURE VALIDATE_GS_DB_LINKS;
+
+END REFRASH_ACTIVE_APP_LIST_PKG;
+/
+
+CREATE OR REPLACE PACKAGE BODY REFRASH_ACTIVE_APP_LIST_PKG AS
+
+
+PROCEDURE REFRASH_ACTIVE_APP_LIST
+(last_alive_time IN DATE DEFAULT SYSDATE-7 )
+
+IS
+
+v_num number(1);
+l_sql_stmt varchar2(2000);
+emesg VARCHAR2(250);
+l_tmp_space varchar2(2000);
+v_mon VARCHAR2(20);
+l_database VARCHAR2(30);
+l_dbversion VARCHAR2(30);
+
+   TYPE OwnerList IS TABLE OF VARCHAR2(30);
+   v_owner OwnerList;
+
+
+begin
+
+-- validate db_links and log any db link that doesnt work into active_app_list_discards
+VALIDATE_GS_DB_LINKS;
+
+
+-- Prepare ACTIVE_APP_LIST table
+EXECUTE IMMEDIATE 'ALTER TABLE GS_SEARCH_TYPES_DET disable CONSTRAINT FK_SRCH_TYPES_SYSTEM_ID';
+EXECUTE IMMEDIATE 'delete from ACTIVE_APP_LIST';
+
+--- Hardcoded adding HR3_PROD to active_app_list (static data only schema)
+INSERT INTO ACTIVE_APP_LIST (DB_VERSION,
+   APPLICATION, DATABASE, DB_LINK,
+   DB_SCHEMA, ENVIRONMENT, IC_VERSION,
+   ID, SAMPLE_DATE, SYSTEM_TYPE)
+VALUES ('11.2.0.4.0', 'HR3_PROD',
+ 'SHPROD',
+ 'GS_SHPROD',
+ 'HR3_PROD',
+ 'PROD',
+ '0.0.0.0.0.0',
+ ora_hash('HR3PROD||HR3_PROD||GS_SHPROD',4294967295),
+ sysdate,
+ 'IC');
+commit;
+
+
+--- Hardcoded adding DBM_PROD to active_app_list (static data only schema)
+INSERT INTO ACTIVE_APP_LIST (DB_VERSION,
+   APPLICATION, DATABASE, DB_LINK,
+   DB_SCHEMA, ENVIRONMENT, IC_VERSION,
+   ID, SAMPLE_DATE, SYSTEM_TYPE)
+VALUES ('11.2.0.4.0', 'DNM_PROD',
+ 'TRMPROD',
+ 'GS_TRMPROD11',
+ 'DNM_PROD',
+ 'PROD',
+ '0.0.0.0.0.0',
+ ora_hash('TRMPROD||DNM_PROD||GS_TRMPROD11',4294967295),
+ sysdate,
+ 'IC');
+commit;
+
+
+
+-------------------------------------------------------------------------------------------------
+-- Refrash Adapter Apps
+-------------------------------------------------------------------------------------------------
+
+for i in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') loop
+
+-------------------------------------------------------------------------------------------------
+-- This block checks if the db link is valid, id user dba_apps has access to dba_apps,
+-- and if there are any IC_CNFG_INSTANCE tables on the db at all, else it will skip this db link.
+    BEGIN
+
+    l_sql_stmt := 'select view_name from dba_views@'||i.db_link||' where view_name= ''ADAPTER'' and rownum <2';
+
+    l_tmp_space := NULL;
+
+      EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_tmp_space;
+
+    DBMS_OUTPUT.PUT_LINE( l_tmp_space);
+
+
+        EXCEPTION
+
+                  WHEN OTHERS THEN
+                  emesg := SQLERRM;
+                  DBMS_OUTPUT.PUT_LINE (emesg);
+
+                  l_tmp_space := NULL;
+
+    END;
+-------------------------------------------------------------------------------------------------
+
+-- Procced only if the check block is valid.
+        IF l_tmp_space = 'ADAPTER' THEN
+
+        -- retrieve the Database name
+
+        l_sql_stmt := 'select UPPER(instance_name) NAME,version from v$instance@'||i.db_link;
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_database,l_dbversion;
+
+        --DBMS_OUTPUT.PUT_LINE ('inside db link: '|| i.db_link);
+
+        -- retrieve the list of relvant sechmas from the database
+        l_sql_stmt := 'select owner from dba_views@'||i.db_link||' where view_name =''ADAPTER''';
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        BULK COLLECT INTO v_owner;
+
+
+        -- for each schema retrieve the IC_CNFG_INSTANCE data
+        FOR idx IN 1.. v_owner.count LOOP
+
+        DBMS_OUTPUT.put_line('Dynamic FETCH  : ' || v_owner(idx));
+
+       l_sql_stmt := 'insert into ACTIVE_APP_LIST (DB_VERSION,id,database,ENVIRONMENT,APPLICATION,db_link,system_type,db_schema,SAMPLE_DATE,IC_VERSION)
+       VALUES ('''||l_dbversion||''',ora_hash('''||l_database||v_owner(idx)||i.db_link||''',4294967295),
+       '''||l_database||''',
+       CASE
+        WHEN '''||v_owner(idx)||''' LIKE ''%PREPROD%'' THEN ''PREPROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%PROD%'' THEN ''PROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%TEST%'' THEN ''TEST''
+        WHEN '''||v_owner(idx)||''' LIKE ''%UAT%''  THEN ''UAT''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BETA%'' THEN ''BETA''
+        WHEN '''||v_owner(idx)||''' LIKE ''%DEMO%'' THEN ''DEMO''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BCK%'' THEN ''BACKUP_SCHEMA''
+        ELSE ''n/a'' END,
+       '''||v_owner(idx)||''',
+       '''||i.db_link||''',
+       ''ADAPTER'',
+       '''||v_owner(idx)||''',
+       SYSDATE,
+       ''ADAPTER'')';
+
+       --DBMS_OUTPUT.PUT_LINE( l_sql_stmt);
+
+       EXECUTE IMMEDIATE l_sql_stmt;
+
+        END LOOP;
+
+        COMMIT;
+
+        END IF;
+
+COMMIT;
+end loop;
+
+
+-------------------------------------------------------------------------------------------------
+-- Refrash IC Apps
+-------------------------------------------------------------------------------------------------
+
+for i in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') loop
+
+-------------------------------------------------------------------------------------------------
+-- This block checks if the db link is valid, id user dba_apps has access to dba_apps,
+-- and if there are any IC_CNFG_INSTANCE tables on the db at all, else it will skip this db link.
+    BEGIN
+
+    l_sql_stmt := 'select object_name from dba_objects@'||i.db_link||' where object_name= ''IC_CNFG_INSTANCE'' and rownum <2';
+
+    l_tmp_space := NULL;
+
+      EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_tmp_space;
+
+    --DBMS_OUTPUT.PUT_LINE( l_tmp_space);
+
+
+        EXCEPTION
+
+                  WHEN OTHERS THEN
+                  emesg := SQLERRM;
+                  --DBMS_OUTPUT.PUT_LINE (emesg);
+
+                  l_tmp_space := NULL;
+
+    END;
+-------------------------------------------------------------------------------------------------
+
+-- Procced only if the check block is valid.
+        IF l_tmp_space = 'IC_CNFG_INSTANCE' THEN
+
+
+        -- retrieve the Database name
+
+        l_sql_stmt := 'select UPPER(instance_name) NAME,version from v$instance@'||i.db_link;
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_database,l_dbversion;
+
+        --DBMS_OUTPUT.PUT_LINE ('inside db link: '|| i.db_link);
+
+        -- retrieve the list of relvant sechmas from the database
+        l_sql_stmt := 'select owner from dba_tables@'||i.db_link||' where table_name =''IC_CNFG_INSTANCE''';
+
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        BULK COLLECT INTO v_owner;
+
+
+        -- for each schema retrieve the IC_CNFG_INSTANCE data
+        FOR idx IN 1.. v_owner.count LOOP
+
+        DBMS_OUTPUT.put_line('Dynamic FETCH  : ' || v_owner(idx));
+
+       l_sql_stmt := 'insert into ACTIVE_APP_LIST (DB_VERSION,id,database,ENVIRONMENT,APPLICATION,db_link,system_type,db_schema,SAMPLE_DATE,IC_VERSION)
+       (SELECT '''||l_dbversion||''',ora_hash('''||l_database||v_owner(idx)||i.db_link||''',4294967295),
+       '''||l_database||''',
+       CASE
+        WHEN '''||v_owner(idx)||''' LIKE ''%PREPROD%'' THEN ''PREPROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%PROD%'' THEN ''PROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%TEST%'' THEN ''TEST''
+        WHEN '''||v_owner(idx)||''' LIKE ''%UAT%''  THEN ''UAT''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BETA%'' THEN ''BETA''
+        WHEN '''||v_owner(idx)||''' LIKE ''%DEMO%'' THEN ''DEMO''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BCK%'' THEN ''BACKUP_SCHEMA''
+        ELSE ''n/a'' END "ENVIRONMENT",
+       '''||v_owner(idx)||''',
+       '''||i.db_link||''',
+       ''IC'',
+       '''||v_owner(idx)||''' DB_SCHEMA,
+       SYSDATE,
+       VERSION
+       FROM '||v_owner(idx)||'.IC_CNFG_INSTANCE@'||i.db_link||'
+       WHERE ID != 0
+       AND ROWNUM <2
+       AND LAST_ALIVE_TIME > '''||last_alive_time||''')';
+
+       DBMS_OUTPUT.PUT_LINE( l_sql_stmt);
+
+       EXECUTE IMMEDIATE l_sql_stmt;
+
+        END LOOP;
+
+        COMMIT;
+
+        END IF;
+
+COMMIT;
+end loop;
+
+
+EXECUTE IMMEDIATE 'ALTER TABLE GS_SEARCH_TYPES_DET enable CONSTRAINT FK_SRCH_TYPES_SYSTEM_ID';
+
+END REFRASH_ACTIVE_APP_LIST;
+
+
+PROCEDURE VALIDATE_GS_DB_LINKS
+IS
+
+l_sql_stmt varchar2(4000);
+l_tmp_var number;
+l_tmp_char varchar2(30);
+emesg varchar2(4000);
+
+BEGIN
+
+for i in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') loop
+
+l_sql_stmt := 'select count(1) from v$database@'||i.db_link||'';
+
+     l_tmp_var := 0;
+
+      begin
+
+      EXECUTE IMMEDIATE l_sql_stmt INTO l_tmp_var;
+
+      EXCEPTION
+       WHEN OTHERS THEN
+       emesg := SQLERRM;
+
+      END;
+
+
+        IF l_tmp_var != 1 THEN
+
+            select count(1) into l_tmp_char from active_app_list_discards where db_link = i.db_link;
+
+             IF l_tmp_char = 0 THEN
+               INSERT INTO active_app_list_discards values (i.db_link,sysdate,emesg);
+               commit;
+             END IF;
+
+        ELSE
+
+        delete active_app_list_discards
+        where db_link = i.db_link;
+        commit;
+
+        END IF;
+
+END LOOP;
+
+-- remove orphaned db_links from ACTIVE_APP_LIST_DISCARDS
+delete ACTIVE_APP_LIST_DISCARDS
+where db_link in (select db_link from ACTIVE_APP_LIST_DISCARDS
+where db_link not in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%'));
+commit;
+
+END VALIDATE_GS_DB_LINKS;
+
+
+END REFRASH_ACTIVE_APP_LIST_PKG;
+/

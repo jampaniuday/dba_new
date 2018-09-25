@@ -1,0 +1,265 @@
+CREATE OR REPLACE PACKAGE SIGNATURE AUTHID CURRENT_USER IS
+	FUNCTION GET_SIGNATURE(P_SCHEMA IN VARCHAR2 DEFAULT USER) RETURN CLOB DETERMINISTIC;
+END SIGNATURE;
+/
+
+CREATE OR REPLACE PACKAGE BODY SIGNATURE IS
+
+  L_XSL XMLTYPE := XMLTYPE('<?xml version="1.0"?>
+<xsl:stylesheet version="1.0"
+xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <xsl:template name="get_obj_type">
+    <xsl:param name="typeID" />
+    <xsl:choose>
+      <xsl:when test="$typeID = ''1'' or $typeID = 1"> VARCHAR2</xsl:when>
+      <xsl:when test="$typeID = ''2'' or $typeID = 2"> NUMBER</xsl:when>
+      <xsl:otherwise>UNKNOWN</xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+  <xsl:template match="/">
+    <database>
+      <tables>
+        <xsl:for-each select="//TABLE_T">
+          <xsl:sort select="SCHEMA_OBJ/NAME" />
+          <table>
+            <xsl:variable name="tbl_name">
+              <xsl:value-of select="SCHEMA_OBJ/NAME" />
+            </xsl:variable>
+            <xsl:attribute name="name">
+              <xsl:value-of select="$tbl_name" />
+            </xsl:attribute>
+            <columns>
+              <xsl:for-each select="COL_LIST//COL_LIST_ITEM">
+                <xsl:sort select="NAME" />
+                <column>
+                  <xsl:attribute name="name">
+                    <xsl:value-of select="NAME" />
+                  </xsl:attribute>
+                  <not_null>
+                    <xsl:value-of select="NOT_NULL" />
+                  </not_null>
+                  <type_num>
+                    <xsl:value-of select="TYPE_NUM" />
+                    <xsl:call-template name="get_obj_type">
+                      <xsl:with-param name="typeID"
+                      select="TYPE_NUM" />
+                    </xsl:call-template>
+                  </type_num>
+                  <length>
+                    <xsl:value-of select="LENGTH" />
+                  </length>
+                  <scale>
+                    <xsl:value-of select="SCALE" />
+                  </scale>
+                  <default>
+                    <xsl:value-of select="DEFAULT" />
+                  </default>
+                </column>
+              </xsl:for-each>
+            </columns>
+            <indexes>
+              <xsl:for-each select="//INDEX_T[BASE_OBJ/NAME = $tbl_name]">
+
+                <xsl:sort select="SCHEMA_OBJ/NAME" />
+                <index>
+                  <xsl:variable name="indexName"
+                  select="SCHEMA_OBJ/NAME" />
+                  <xsl:choose>
+                    <xsl:when test="substring($indexName, 1, 4) = ''SYS_''">
+
+                      <xsl:attribute name="name">
+                      SYSTEM_GENERATED_NAME</xsl:attribute>
+                    </xsl:when>
+                    <xsl:otherwise>
+                      <xsl:attribute name="name">
+                        <xsl:value-of select="$indexName" />
+                      </xsl:attribute>
+                    </xsl:otherwise>
+                  </xsl:choose>
+                  <columns>
+                    <xsl:for-each select="COL_LIST//COL">
+                      <xsl:sort select="../POS_NUM" />
+                      <column>
+                        <xsl:attribute name="name">
+                          <xsl:value-of select="NAME" />
+                        </xsl:attribute>
+                      </column>
+                    </xsl:for-each>
+                    <xsl:for-each select="./CON1/COL_LIST//COL">
+                      <xsl:sort select="../POS_NUM" />
+                      <column>
+                        <xsl:attribute name="name">
+                          <xsl:value-of select="NAME" />
+                        </xsl:attribute>
+                      </column>
+                    </xsl:for-each>
+                  </columns>
+                </index>
+              </xsl:for-each>
+            </indexes>
+            <unique_keys>
+              <xsl:for-each select="CON1_LIST//CON1_LIST_ITEM">
+
+                <xsl:sort select="translate(NAME, ''1234567890'', ''0000000000'')" />
+                <constraint>
+                  <xsl:variable name="constarintName"
+                  select="NAME" />
+                  <xsl:choose>
+                    <xsl:when test="substring($constarintName, 1, 4) = ''SYS_''">
+
+                      <xsl:attribute name="name">
+                      SYSTEM_GENERATED_NAME</xsl:attribute>
+                    </xsl:when>
+                    <xsl:otherwise>
+                      <xsl:attribute name="name">
+                        <xsl:value-of select="$constarintName" />
+                      </xsl:attribute>
+                    </xsl:otherwise>
+                  </xsl:choose>
+                  <columns>
+                    <xsl:for-each select="COL_LIST//COL">
+                      <xsl:sort select="../POS_NUM" />
+                      <column>
+                        <xsl:attribute name="name">
+                          <xsl:value-of select="NAME" />
+                        </xsl:attribute>
+                      </column>
+                    </xsl:for-each>
+                  </columns>
+                </constraint>
+              </xsl:for-each>
+            </unique_keys>
+            <foreign_keys>
+              <xsl:for-each select="CON2_LIST//CON2_LIST_ITEM">
+
+                <xsl:sort select="translate(NAME, ''1234567890'', ''0000000000'')" />
+                <constraint>
+                  <xsl:variable name="constarintName"
+                  select="NAME" />
+                  <xsl:choose>
+                    <xsl:when test="substring($constarintName, 1, 4) = ''SYS_''">
+
+                      <xsl:attribute name="name">
+                      SYSTEM_GENERATED_NAME</xsl:attribute>
+                    </xsl:when>
+                    <xsl:otherwise>
+                      <xsl:attribute name="name">
+                        <xsl:value-of select="$constarintName" />
+                      </xsl:attribute>
+                    </xsl:otherwise>
+                  </xsl:choose>
+
+                  <xsl:attribute name="referenced_table">
+                        <xsl:value-of select="SCHEMA_OBJ/NAME" />
+                  </xsl:attribute>
+                  <source_columns>
+                    <xsl:for-each select="SRC_COL_LIST//SRC_COL_LIST_ITEM">
+                      <xsl:sort select="POS_NUM" />
+                      <column>
+                        <xsl:attribute name="name">
+                          <xsl:value-of select="COL/NAME" />
+                        </xsl:attribute>
+                      </column>
+                    </xsl:for-each>
+                  </source_columns>
+                  <target_columns>
+                    <xsl:for-each select="TGT_COL_LIST//TGT_COL_LIST_ITEM">
+                      <xsl:sort select="POS_NUM" />
+                      <column>
+                        <xsl:attribute name="name">
+                          <xsl:value-of select="COL/NAME" />
+                        </xsl:attribute>
+                      </column>
+                    </xsl:for-each>
+                  </target_columns>
+                </constraint>
+              </xsl:for-each>
+            </foreign_keys>
+
+          </table>
+        </xsl:for-each>
+      </tables>
+      <views>
+        <xsl:for-each select="//VIEW_T">
+          <xsl:sort select="SCHEMA_OBJ/NAME" />
+          <view>
+            <xsl:attribute name="name">
+              <xsl:value-of select="SCHEMA_OBJ/NAME" />
+            </xsl:attribute>
+            <text>
+              <xsl:variable name="str_sql">
+                <xsl:value-of select="TEXT" />
+              </xsl:variable>
+              <xsl:value-of select="normalize-space($str_sql)" />
+            </text>
+          </view>
+        </xsl:for-each>
+      </views>
+      <sequences>
+        <xsl:for-each select="//SEQUENCE_T">
+          <xsl:sort select="SCHEMA_OBJ/NAME" />
+          <sequence>
+            <xsl:attribute name="name">
+              <xsl:value-of select="SCHEMA_OBJ/NAME" />
+            </xsl:attribute>
+            <increment>
+              <xsl:value-of select="INCRE" />
+            </increment>
+            <minval>
+              <xsl:value-of select="MINVALUE" />
+            </minval>
+            <maxval>
+              <xsl:value-of select="MAXVALUE" />
+            </maxval>
+            <cycle>
+              <xsl:value-of select="CYCLE" />
+            </cycle>
+            <ordered>
+              <xsl:value-of select="SEQ_ORDER" />
+            </ordered>
+            <cache_size>
+              <xsl:value-of select="CACHE" />
+            </cache_size>
+          </sequence>
+        </xsl:for-each>
+      </sequences>
+    </database>
+  </xsl:template>
+</xsl:stylesheet>');
+l_generated_xml CLOB;
+
+  FUNCTION GET_SIGNATURE(P_SCHEMA IN VARCHAR2 DEFAULT USER) RETURN CLOB DETERMINISTIC IS
+  BEGIN
+    WITH XMLS AS
+     (SELECT XMLELEMENT("OBJECTS",
+                        XMLAGG(XMLTYPE(DBMS_METADATA.GET_XML(T.OBJECT_TYPE,
+                                                             T.OBJECT_NAME,
+                                                             T.OWNER)))) XML
+      FROM   DBA_OBJECTS T
+      WHERE  OWNER = P_SCHEMA
+      AND    object_name NOT LIKE 'BIN$%'
+      AND    OBJECT_TYPE IN ('TABLE',
+                             'VIEW',
+                             'SEQUENCE',
+                             'INDEX')
+    )
+
+
+    SELECT XMLELEMENT("DATABASE", XMLAGG(XML)).TRANSFORM(l_xsl).getclobval() XML
+    INTO l_generated_xml
+    FROM XMLS t;
+
+    RETURN l_generated_xml;
+  END;
+END SIGNATURE;
+/
+
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM SIGNATURE FOR SIGNATURE';
+exception
+  when OTHERS then
+    null;
+end;
+/
+

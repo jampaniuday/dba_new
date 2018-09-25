@@ -1,0 +1,21 @@
+NY1P-H3-ORA-VIP:ls -ltr /hr3src/logs/backup.log* |tail -1	
+APTRNVIP1:ls -ltr /sources/scripts/aptrnrac/log/backup.log* |tail -1	
+APICLLOSE-VIP:ls -ltr /sources/scripts/apicllose/log/backup.log* |tail -1
+ATH2OSE:ls -ltr /h2src/logs/backup.log*|tail -1
+NY1U-IC-ORA1:ls -ltr /icsrc/logs/backup.log*|tail -1
+APH2RAC-VIP:ls -ltr /h2src/hrprod/logs/backup.log*|tail -1
+NY1U-H3-ORA1:ls -ltr /hr3src/logs/backup_uat.log*|tail -1
+APJPOEE:ls -ltr /jpsrc/logs/backup.log*|tail -1
+ATJPOEE:ls -ltr /jpsrc/logs/backup.log*|tail -1
+ATDBOEE:ls -ltr /dbsrc/logs/backup.log*|tail -1
+APDBOEE-VIP:ls -ltr /dbsrc/logs/backup.log*|tail -1
+NY1U-H3-ORA2:ls -ltr /hr3src/logs/backup_beta.log*|tail -1
+NJ3P-CLS-ORA-VIP:ls -ltr /cassrc/logs/backup.log*|tail -1
+NJ3U-CT-ORA1:ls -ltr /citisrc/logs/backup.log*|tail -1
+NJ3P-CT-ORA-VIP:ls -ltr /citisrc/logs/backup.log*|tail -1
+NJ3U-HSBC-ORA1:ls -ltr /hsbcsrc/logs/backup.log*|tail -1
+NJ3P-HSBC-ORA-VIP:ls -ltr /hsbcsrc/logs/backup.log*|tail -1
+NJ3P-MS-ORA-VIP:ls -ltr /mssrc/logs/backup.log*|tail -1
+NY1P-IC-ORA-VIP:ls -ltr /icsrc/logs/backup.log*|tail -1
+NY1U-SH-ORA3:ls -ltr /trmsrc/logs/backup*.log*|tail -1
+NJ3P-MSM-ORA-VIP:ls -ltr /msmsrc/logs/backup*.log*|tail -1

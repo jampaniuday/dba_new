@@ -1,0 +1,11 @@
+CREATE OR REPLACE FORCE VIEW V_HR3_2H_BACK_PER_HOUR AS
+SELECT  
+    to_char(TRUNC (created_date,'HH24'),'HH24:MI') TIME, 
+    COUNT (*) NOES
+FROM V_HR3_TRADES
+WHERE created_date >= TRUNC (SYSDATE) 
+  AND created_date <  TRUNC (SYSDATE,'HH24')-1/24
+GROUP BY TRUNC (created_date,'HH24')
+ORDER BY TRUNC (created_date,'HH24')
+;
+comment on table V_HR3_2H_BACK_PER_HOUR is 'Harmony 3: This view sums trades per hour for the last 2 hours beginning from the previous hour oclock. i.e. time now is 14:35, the view will return trades from 13:00 to now.';

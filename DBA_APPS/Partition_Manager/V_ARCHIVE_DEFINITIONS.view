@@ -1,0 +1,29 @@
+CREATE OR REPLACE VIEW V_ARCHIVE_DEFINITIONS AS
+SELECT OWNER,
+			 ORDER_IN_PROCESS,
+       DECODE(status,1,'Active',0,'Inactive') STATUS,
+			 TABLE_NAME,
+       decode(PARTITIONED,1,'YES',0,'NO') PARTITIONED,
+			 DEST_TABLE_NAME,
+			 'Keep ' || RETENTION || ' days' RETENTION,
+			 DECODE(PARTITIONED, 1, 'Prepare ' || DAYS_AHEAD || ' days ahead') DAYS_AHEAD,
+			 DECODE(PARTITIONED, 0, 'Archive by ' || ARCHIVE_COLUMN || ' column') ARCHIVE_COLUMN,
+			 DECODE(PARTITIONED, 1, 'Create new partitions on tablespace ' ||PARTITION_TABLESPACE_NAME) PARTITION_TABLESPACE_NAME,
+			 DECODE(PARTITIONED, 0, 'Archive time-out is :' || TIME_LIMIT) TIME_LIMIT,
+			 DECODE(PARTITIONED, 0, 'Archive process logs every ' || LOGGING_INTERVAL || ' minutes') LOGGING_INTERVAL,
+			 DECODE(PARTITIONED, 0, ADDITIONAL_CONDITION) ADDITIONAL_CONDITION,
+			 DECODE(PARTITIONED, 0, SLEEP) SLEEP,
+			 DECODE(PARTITIONED, 0, CHUNK_SIZE) CHUNK_SIZE,
+			 DECODE(PARTITIONED, 0, HINT) HINT,
+			 DECODE(PARTITIONED, 1, 'Check this before drop partitions: ' || VALIDATION) VALIDATION,
+			 DECODE(PARTITIONED, 1, 'Partition period size is: ' || PERIOD_SIZE || ' min.') PERIOD_SIZE,
+			 DECODE(PARTITIONED, 1, 'Partition prefix is: ' || PART_PREFIX || '.') PART_PREFIX,
+			 DECODE(PARTITIONED, 1, 'Partition name format is: P_' || DATE_FORMAT || '.') DATE_FORMAT,
+			 CRON_EXPR,
+			 DECODE(PARTITIONED, 1, 'The size of the next partition would be ' || GROWTH_FACTOR*100 || '% of the average last 5 partitions.') GROWTH_FACTOR
+FROM   ARCHIVE_DEFINITIONS T
+ORDER  BY OWNER,
+					ORDER_IN_PROCESS;
+
+
+					

@@ -1,0 +1,11 @@
+create or replace force view SC_SCHEMAS_SIZES_WITHOUT_DW as
+select SCHEMA_NAME,
+       CAPTURE_TIME,
+       Sum(SIZE_MB) SIZE_MB   
+from   SC_SEGMENTS_SIZES
+where  TABLE_NAME not like 'DW%' and TABLE_NAME not like '%HIS'
+group by SCHEMA_NAME,
+         CAPTURE_TIME
+order by SCHEMA_NAME,
+         CAPTURE_TIME desc
+/

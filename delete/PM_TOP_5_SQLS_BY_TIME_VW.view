@@ -1,0 +1,17 @@
+create or replace force view PM_TOP_5_SQLS_BY_TIME_VW as
+select * from 
+(
+select SCHEMA_NAME,
+       rank () over (partition by SCHEMA_NAME order by AVG_ELA_TIME_SEC desc) RANK,
+       EXECUTIONS,
+       AVG_ELA_TIME_SEC,
+       LAST_ACTIVE_TIME,
+       SQL_ID,
+       SQL_FULLTEXT,
+       PLAN_HASH_VALUE
+from   PM_PLANS
+)
+where RANK <=5 
+order by SCHEMA_NAME,
+         RANK
+/

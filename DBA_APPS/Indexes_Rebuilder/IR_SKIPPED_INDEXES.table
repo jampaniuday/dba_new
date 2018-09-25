@@ -1,0 +1,14 @@
+create table IR_SKIPPED_INDEXES
+(
+    OWNER      varchar2(30) not null,
+    NAME       varchar2(30) not null,
+    ERROR_TIME date not null,
+    ERROR      varchar2(200)
+)
+/
+
+grant all on IR_SKIPPED_INDEXES to PUBLIC
+/
+
+create public synonym IR_SKIPPED_INDEXES for IR_SKIPPED_INDEXES
+/

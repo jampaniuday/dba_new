@@ -1,0 +1,40 @@
+create table DATA_MANAGER_ROWS_TO_ARCHIVE
+(
+  ROW_ID            number       			     not null,
+  CLIENT            varchar2(90)                 not null,
+  TXN_ID            number                       not null,
+  ORDER_IN_TXN      number       default 0       not null,
+  SOURCE_TABLE_NAME varchar2(30)                 not null,
+  TARGET_TABLE_NAME varchar2(30)                 not null,
+  PK_COLUMN         varchar2(30)                 not null,
+  PK_VALUE          number                       not null,
+  DATA_DATE         date,       
+  THREAD            number                       not null,
+  INSERT_TIME       date         default SYSDATE not null,
+  IS_PROCESSED      number(1)    default 0       not null,
+  PROCESS_TIME      date,
+  IS_ERROR          number(1)    default 0       not null,
+  ERROR             varchar2(200)
+)
+/
+
+create unique index DATA_MANAGER_RTA_IDXPK on DATA_MANAGER_ROWS_TO_ARCHIVE(ROW_ID) REVERSE
+/
+
+alter table DATA_MANAGER_ROWS_TO_ARCHIVE add constraint DATA_MANAGER_RTA_PK primary key (ROW_ID) using index DATA_MANAGER_RTA_IDXPK
+/
+
+create index DATA_MANAGER_RTA_IDX1 on DATA_MANAGER_ROWS_TO_ARCHIVE(CLIENT,
+																   THREAD,                                                                      
+																   TXN_ID,
+																   ORDER_IN_TXN,
+                                                                   IS_PROCESSED)
+/
+
+create index DATA_MANAGER_RTA_IDX2 on DATA_MANAGER_ROWS_TO_ARCHIVE(TXN_ID) REVERSE
+/
+
+alter table DATA_MANAGER_ROWS_TO_ARCHIVE add constraint DATA_MANAGER_RTA_UNQ unique (SOURCE_TABLE_NAME, 
+                                                                                     PK_COLUMN, 
+                                                                                     PK_VALUE)
+/

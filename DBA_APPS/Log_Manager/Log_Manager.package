@@ -1,0 +1,126 @@
+CREATE OR REPLACE PACKAGE Log_Manager AUTHID CURRENT_USER AS
+-- The package manages the logging of database applications.
+-- --------------------------------------------------------------------------
+  
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'Log_Manager';
+  VERSION    CONSTANT VARCHAR2(30) := '1.0';
+  
+  -- The procedure writes log messages to log table.
+  PROCEDURE Write_To_Log_Table(p_app_name     in VARCHAR2,
+                               p_time_stamp   in TIMESTAMP := systimestamp,
+                               p_message      in VARCHAR2,
+                               p_counter      in NUMBER := NULL,
+                               p_message_type in NUMBER);
+  
+  -- The procedure clears the log table.
+  PROCEDURE Clear_Log_Table;
+  
+  -- The procedure returns the message value of application's run start.
+  FUNCTION Msg_App_Start return varchar2;
+  
+  -- The procedure returns the message value of application's run end.
+  FUNCTION Msg_App_End return varchar2;
+  
+  -- The procedure returns the message value of message type "info".
+  FUNCTION Msg_Type_Info return varchar2;
+  
+  -- The procedure returns the message value of message type "warning".
+  FUNCTION Msg_Type_Warning return varchar2;
+  
+  -- The procedure returns the message value of message type "error".
+  FUNCTION Msg_Type_Error return varchar2;
+END Log_Manager;
+/
+
+CREATE OR REPLACE PACKAGE BODY Log_Manager AS
+  
+  C_MSG_TYPE_INFO CONSTANT NUMBER       := 0;
+  C_MSG_TYPE_WARN CONSTANT NUMBER       := 1;
+  C_MSG_TYPE_ERR  CONSTANT NUMBER       := 2;
+  
+  C_MSG_APP_START CONSTANT VARCHAR2(10) := 'START';
+  C_MSG_APP_END   CONSTANT VARCHAR2(10) := 'END';
+  
+  PROCEDURE Write_To_Log_Table(p_app_name     in VARCHAR2,
+                               p_time_stamp   in TIMESTAMP := systimestamp,
+                               p_message      in VARCHAR2,
+                               p_counter      in NUMBER := NULL,
+                               p_message_type in NUMBER) IS PRAGMA AUTONOMOUS_TRANSACTION;
+  BEGIN
+    insert into LOG (SCHEMA, APP, TIME_STAMP, MESSAGE, COUNTER, MESSAGE_TYPE)
+    values (user, p_app_name, p_time_stamp, p_message, p_counter, p_message_type);
+
+    commit; 
+  END;
+
+  PROCEDURE Clear_Log_Table IS
+    -- Constants of log messages
+    C_APP_NAME       CONSTANT VARCHAR2(30) := 'Log_Manager.Clear_Log_Table';
+
+    C_RETENTION_DAYS CONSTANT NUMBER := 120;
+
+    v_errm VARCHAR2(200);
+  BEGIN
+    delete LOG
+    where  TIME_STAMP < systimestamp - C_RETENTION_DAYS;
+
+    commit;
+  EXCEPTION
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: '||v_errm, null, Msg_Type_Error);
+  END;
+  
+  FUNCTION Msg_App_Start return varchar2 IS
+  BEGIN
+	return C_MSG_APP_START;
+  END;
+  
+  FUNCTION Msg_App_End return varchar2 IS
+  BEGIN
+	return C_MSG_APP_END;
+  END;
+  
+  FUNCTION Msg_Type_Info return varchar2 IS
+  BEGIN
+	return C_MSG_TYPE_INFO;
+  END;
+  
+  FUNCTION Msg_Type_Warning return varchar2 IS
+  BEGIN
+	return C_MSG_TYPE_WARN;
+  END;
+  
+  FUNCTION Msg_Type_Error return varchar2 IS
+  BEGIN
+	return C_MSG_TYPE_ERR;
+  END;
+  
+END Log_Manager;
+/
+
+
+GRANT EXECUTE ON Log_Manager TO PUBLIC
+/
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM LOG_MANAGER FOR Log_Manager';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+BEGIN
+  delete VERSIONS
+  where  COMPONENT_NAME = Log_Manager.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values (Log_Manager.C_APP_NAME,
+			          Log_Manager.VERSION,
+					  SYSDATE);
+  commit;
+END;
+/

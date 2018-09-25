@@ -1,0 +1,61 @@
+
+create or replace view V_ARCHIVE_DEFINITIONS as 
+select table_name, dest_table_name, retention, archive_column,
+        order_in_process, additional_condition, status
+from user_archive_definitions;
+
+
+
+
+CREATE OR REPLACE TRIGGER io_v_archive_definitions
+  INSTEAD OF INSERT OR UPDATE OR DELETE
+  ON V_ARCHIVE_DEFINITIONS
+DECLARE
+  l_ORDER_IN_PROCESS number;
+BEGIN
+
+  -- checking parameter  
+  if nvl(data_manager.get_key_value(user, 'update_def_via_view'), 'TRUE') <> 'TRUE' then
+    raise_application_error( -20001, 'Cannot update user_archive_definitions via view. Contact DBA.' );
+  end if;
+  
+  IF INSERTING THEN
+    if :NEW.order_in_process is not null or :NEW.additional_condition is not null or :NEW.status is not null then
+      raise_application_error( -20001, 'You cannot insert values into order_in_process/additional_condition/status columns' );
+    end if; 
+  
+    select nvl(max(ORDER_IN_PROCESS), 0)+10
+      into l_ORDER_IN_PROCESS
+      from user_archive_definitions;
+      
+    EXECUTE IMMEDIATE 'insert into user_archive_definitions '
+    || ' (TABLE_NAME,DEST_TABLE_NAME,ARCHIVE_COLUMN,ORDER_IN_PROCESS,
+        PARTITIONED,TIME_LIMIT,LOGGING_INTERVAL,ADDITIONAL_CONDITION,
+        SLEEP,CHUNK_SIZE,HINT,STATUS,RETENTION,VIEW_NAME)                                                                                             
+    values
+    (:TABLE_NAME,:DEST_TABLE_NAME,:ARCHIVE_COLUMN,' ||
+        l_ORDER_IN_PROCESS || ',0,180,30,null,0,10000,null,1,:RETENTION,null)'
+    USING :NEW.TABLE_NAME,:NEW.DEST_TABLE_NAME,:NEW.ARCHIVE_COLUMN,:NEW.RETENTION;                             
+    
+  ELSIF DELETING THEN
+    EXECUTE IMMEDIATE 'delete from user_archive_definitions WHERE ORDER_IN_PROCESS = :ORDER_IN_PROCESS'
+    USING :OLD.ORDER_IN_PROCESS;
+    
+  ELSIF UPDATING THEN
+  
+    if nvl(:NEW.order_in_process, -999) <> nvl(:OLD.order_in_process, -999) or 
+       nvl(:NEW.additional_condition, '-999') <> nvl(:OLD.additional_condition, '-999') or
+       nvl(:NEW.status, '-999') <> nvl(:OLD.status, '-999') then
+      raise_application_error( -20001, 'You cannot update order_in_process/additional_condition/status columns' );
+    end if; 
+    
+    EXECUTE IMMEDIATE 'update user_archive_definitions '
+    || ' set TABLE_NAME= :TABLE_NAME,DEST_TABLE_NAME= :DEST_TABLE_NAME,
+        ARCHIVE_COLUMN= :ARCHIVE_COLUMN,RETENTION= :RETENTION
+    where ORDER_IN_PROCESS = :ORDER_IN_PROCESS2'
+    USING :NEW.TABLE_NAME,:NEW.DEST_TABLE_NAME,:NEW.ARCHIVE_COLUMN,
+        :NEW.RETENTION,:OLD.ORDER_IN_PROCESS;
+  END IF;
+  
+END;
+/

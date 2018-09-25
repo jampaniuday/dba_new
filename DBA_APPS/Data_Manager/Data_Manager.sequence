@@ -1,0 +1,38 @@
+create sequence DATA_MANAGER_ARCH_TABLE_SEQ increment by 1 start with 1 cache 10 nocycle
+/
+grant select on DATA_MANAGER_ARCH_TABLE_SEQ to PUBLIC
+/
+create public synonym DATA_MANAGER_ARCH_TABLE_SEQ for DATA_MANAGER_ARCH_TABLE_SEQ
+/
+
+
+create sequence DATA_MANAGER_TXN_ID_SEQ increment by 1 start with 1 cache 10000 nocycle
+/
+grant select on DATA_MANAGER_TXN_ID_SEQ to PUBLIC
+/
+create public synonym DATA_MANAGER_TXN_ID_SEQ  for DATA_MANAGER_TXN_ID_SEQ 
+/
+
+
+create sequence DATA_MANAGER_ROW_ID_SEQ increment by 1 start with 1 cache 10000 nocycle 
+/
+grant select on DATA_MANAGER_ROW_ID_SEQ to PUBLIC
+/
+create public synonym DATA_MANAGER_ROW_ID_SEQ  for DATA_MANAGER_ROW_ID_SEQ 
+/
+
+
+create sequence DATA_MANAGER_THREAD_ID_SEQ increment by 1 start with 1 cache 10 nocycle
+/
+grant select on DATA_MANAGER_THREAD_ID_SEQ to PUBLIC
+/
+create public synonym DATA_MANAGER_THREAD_ID_SEQ  for DATA_MANAGER_THREAD_ID_SEQ 
+/
+
+
+create sequence DATA_MANAGER_LOG_SEQ increment by 1 start with 1 cache 10 nocycle
+/
+grant select on DATA_MANAGER_LOG_SEQ to PUBLIC
+/
+create public synonym DATA_MANAGER_LOG_SEQ  for DATA_MANAGER_LOG_SEQ 
+/

@@ -1,0 +1,59 @@
+CREATE OR REPLACE TYPE myTableType as table
+     of varchar2 (255); 
+/     
+     
+CREATE OR REPLACE PACKAGE generic_context_pkg IS
+
+
+  
+    PROCEDURE SET_PARAM(P_KEY IN VARCHAR2, P_VALUE IN VARCHAR2);
+    PROCEDURE RESET_PARAMS;
+
+  function in_list( p_string in varchar2 ) return myTableType;
+END; 
+/
+
+CREATE OR REPLACE PACKAGE BODY generic_context_pkg IS
+   
+
+    PROCEDURE SET_PARAM(P_KEY IN VARCHAR2, P_VALUE IN VARCHAR2) IS
+    BEGIN
+        DBMS_SESSION.SET_CONTEXT('generic_ctx', UPPER(P_KEY), P_VALUE);
+    END;
+    PROCEDURE RESET_PARAMS IS
+    BEGIN
+        DBMS_SESSION.CLEAR_CONTEXT('generic_ctx');
+    END;
+  
+function in_list( p_string in varchar2 ) return myTableType
+ as
+     l_string        long default p_string || ',';
+     l_data          myTableType := myTableType();
+     n               number;
+ begin
+   loop
+       exit when l_string is null;
+       n := instr( l_string, ',' );
+       l_data.extend;
+       l_data(l_data.count) := 
+             ltrim( rtrim( substr( l_string, 1, n-1 ) ) );
+       l_string := substr( l_string, n+1 );
+  end loop;
+
+  return l_data;
+end;
+
+END; 
+/     
+
+
+GRANT EXECUTE ON generic_context_pkg TO PUBLIC;
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM generic_context_pkg FOR generic_context_pkg';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+SHOW ERRORS

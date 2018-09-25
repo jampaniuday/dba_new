@@ -1,0 +1,16 @@
+CREATE TABLE SPM_Manager_config (
+  KEY_NAME               VARCHAR2(100)         NOT NULL,
+  DESCRIPTION			 VARCHAR2(1000),
+  KEY_VALUE              VARCHAR2(100)         ,
+  LAST_SAVED_TIME        TIMESTAMP(6)          default sysTIMESTAMP NOT NULL
+);
+
+insert into SPM_Manager_config values ('min_execs', 'Minimum executions to load', '100', sysdate);
+
+insert into SPM_Manager_config values ('min_elapsed', 'Minimum elapsed time to load', '100000', sysdate);
+
+insert into SPM_Manager_config values ('top_sqls', 'Top sqls to load', '1000', sysdate);
+
+insert into SPM_Manager_config values ('retry_evolve', 'Retry evolve after X days', '180', sysdate);
+
+commit;

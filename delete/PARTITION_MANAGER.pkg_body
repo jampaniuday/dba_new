@@ -1,0 +1,529 @@
+CREATE OR REPLACE PACKAGE BODY PARTITION_MANAGER IS
+
+	L_DATE_FORMAT VARCHAR2(30) := 'yyyy_mm_dd';
+	--  Gets the name of the partitioning key for table
+	FUNCTION GET_PARTITION_COLUMN(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2) RETURN VARCHAR2 IS
+		L_RETURNVAL USER_PART_KEY_COLUMNS.COLUMN_NAME%TYPE;
+	BEGIN
+	
+		SELECT T.COLUMN_NAME
+		INTO   L_RETURNVAL
+		FROM   DBA_PART_KEY_COLUMNS T
+		WHERE  T.OWNER = P_OWNER
+		AND    T.NAME = P_TABLE_NAME;
+	
+		RETURN L_RETURNVAL;
+	EXCEPTION
+		WHEN NO_DATA_FOUND THEN
+			RAISE_APPLICATION_ERROR(-20001,
+															'Table ' || P_OWNER || '.' || P_TABLE_NAME ||
+															' is not partitioned');
+	END;
+
+	FUNCTION CONVERT_TIMESTAMP_TO_VARCHAR(P_TIMESTAMP IN TIMESTAMP) RETURN VARCHAR2 DETERMINISTIC IS
+	BEGIN
+		RETURN 'TIMESTAMP'' ' || TO_CHAR(TRUNC(P_TIMESTAMP),
+																		 'yyyy-mm-dd hh24:mi:ss') || '''';
+	END CONVERT_TIMESTAMP_TO_VARCHAR;
+
+	-- Checks for existance of partition in table by date
+	FUNCTION EXISTS_PARTITION(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+		RETURN BOOLEAN IS
+		DUMMY  NUMBER;
+		L_DATE VARCHAR2(100) := CONVERT_TIMESTAMP_TO_VARCHAR(P_DATE + 1);
+	BEGIN
+		SELECT 1
+		INTO   DUMMY
+		FROM   DBA_TAB_PARTITIONS T
+		WHERE  LONG_COLUMN(P_QUERY             => 'select high_value from dba_tab_partitions t where t.table_name=:table_name and partition_name = :partition_name and table_owner = :table_owner',
+											 P_FIRST_BIND        => ':table_name',
+											 P_FIRST_BIND_VALUE  => T.TABLE_NAME,
+											 P_SECOND_BIND       => ':partition_name',
+											 P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+											 P_THIRD_BIND        => ':table_owner',
+											 P_THIRD_BIND_VALUE  => T.TABLE_OWNER) = L_DATE
+					
+		AND    T.TABLE_NAME = P_TABLE_NAME
+		AND    T.TABLE_OWNER = P_OWNER;
+		RETURN TRUE;
+	EXCEPTION
+		WHEN NO_DATA_FOUND THEN
+			RETURN FALSE;
+	END EXISTS_PARTITION;
+
+	FUNCTION GET_PARTITION_NAME(P_OWNER IN VARCHAR2, P_TABLE_NAME IN VARCHAR2, P_DATE IN DATE)
+		RETURN VARCHAR2 IS
+		L_RETURNVAL  VARCHAR2(1000);
+		L_TIME_STAMP VARCHAR2(100) := CONVERT_TIMESTAMP_TO_VARCHAR(P_DATE + 1);
+	BEGIN
+		SELECT T.PARTITION_NAME
+		INTO   L_RETURNVAL
+		FROM   DBA_TAB_PARTITIONS T
+		WHERE  LONG_COLUMN(P_QUERY             => 'select high_value from dba_tab_partitions t where t.table_name=:table_name and partition_name = :partition_name and table_owner = :table_owner',
+											 P_FIRST_BIND        => ':table_name',
+											 P_FIRST_BIND_VALUE  => T.TABLE_NAME,
+											 P_SECOND_BIND       => ':partition_name',
+											 P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+											 P_THIRD_BIND        => ':table_owner',
+											 P_THIRD_BIND_VALUE  => T.TABLE_OWNER) = L_TIME_STAMP
+					
+		AND    T.TABLE_NAME = P_TABLE_NAME
+		AND    T.TABLE_OWNER = P_OWNER;
+		RETURN L_RETURNVAL;
+	EXCEPTION
+		WHEN NO_DATA_FOUND THEN
+			RAISE_APPLICATION_ERROR(-20003,
+															'No partition for date ' ||
+															TO_CHAR(P_DATE,
+																			'yyyy-mm-dd') || ' in table ' || P_OWNER || '.' ||
+															P_TABLE_NAME);
+		WHEN OTHERS THEN
+			RAISE;
+	END GET_PARTITION_NAME;
+
+	FUNCTION GET_IND_PARTITION_NAME(P_OWNER IN VARCHAR2, P_INDEX_NAME IN VARCHAR2, P_DATE IN DATE)
+		RETURN VARCHAR2 IS
+		L_RETURNVAL  VARCHAR2(1000);
+		L_TIME_STAMP VARCHAR2(100) := CONVERT_TIMESTAMP_TO_VARCHAR(P_DATE + 1);
+	BEGIN
+		SELECT T.PARTITION_NAME
+		INTO   L_RETURNVAL
+		FROM   DBA_IND_PARTITIONS T
+		WHERE  LONG_COLUMN(P_QUERY             => 'select high_value from dba_ind_partitions t where t.index_name=:index_name and partition_name = :partition_name and index_owner = :index_owner',
+											 P_FIRST_BIND        => ':index_name',
+											 P_FIRST_BIND_VALUE  => T.INDEX_NAME,
+											 P_SECOND_BIND       => ':partition_name',
+											 P_SECOND_BIND_VALUE => T.PARTITION_NAME,
+											 P_THIRD_BIND        => ':index_owner',
+											 P_THIRD_BIND_VALUE  => T.INDEX_OWNER) = L_TIME_STAMP
+					
+		AND    T.INDEX_NAME = P_INDEX_NAME
+		AND    T.INDEX_OWNER = P_OWNER;
+		RETURN L_RETURNVAL;
+	EXCEPTION
+		WHEN NO_DATA_FOUND THEN
+			RAISE_APPLICATION_ERROR(-20003,
+															'No partition for date ' ||
+															TO_CHAR(P_DATE,
+																			'yyyy-mm-dd') || ' in indesx ' || P_OWNER || '.' ||
+															P_INDEX_NAME);
+		WHEN OTHERS THEN
+			RAISE;
+	END GET_IND_PARTITION_NAME;
+
+	-- helper function to get LONG type high_value column from dba_tab_partitions
+	FUNCTION LONG_COLUMN(P_QUERY IN VARCHAR2, P_FIRST_BIND IN VARCHAR2, P_FIRST_BIND_VALUE IN VARCHAR2, P_SECOND_BIND IN VARCHAR2, P_SECOND_BIND_VALUE IN VARCHAR2, P_THIRD_BIND IN VARCHAR2, P_THIRD_BIND_VALUE IN VARCHAR2)
+		RETURN VARCHAR2 AS
+		L_CURSOR       INTEGER DEFAULT DBMS_SQL.OPEN_CURSOR;
+		L_N            NUMBER;
+		L_LONG_VAL     CLOB;
+		L_LONG_PIECE   CLOB;
+		L_LONG_LEN     NUMBER;
+		L_BUFLEN       NUMBER := 32760;
+		L_CURPOS       NUMBER := 0;
+		L_RETURN_VALUE NUMBER;
+	BEGIN
+		DBMS_SQL.PARSE(L_CURSOR,
+									 P_QUERY,
+									 DBMS_SQL.NATIVE);
+	
+		DBMS_SQL.BIND_VARIABLE(L_CURSOR,
+													 P_FIRST_BIND,
+													 P_FIRST_BIND_VALUE);
+		DBMS_SQL.BIND_VARIABLE(L_CURSOR,
+													 P_SECOND_BIND,
+													 P_SECOND_BIND_VALUE);
+	
+		DBMS_SQL.BIND_VARIABLE(L_CURSOR,
+													 P_THIRD_BIND,
+													 P_THIRD_BIND_VALUE);
+	
+		DBMS_SQL.DEFINE_COLUMN_LONG(L_CURSOR,
+																1);
+		L_N := DBMS_SQL.EXECUTE(L_CURSOR);
+	
+		IF (DBMS_SQL.FETCH_ROWS(L_CURSOR) > 0) THEN
+			LOOP
+				DBMS_SQL.COLUMN_VALUE_LONG(L_CURSOR,
+																	 1,
+																	 L_BUFLEN,
+																	 L_CURPOS,
+																	 L_LONG_VAL,
+																	 L_LONG_LEN);
+				L_CURPOS       := L_CURPOS + L_LONG_LEN;
+				L_RETURN_VALUE := NVL(L_RETURN_VALUE,
+															0) + L_LONG_LEN;
+			
+				EXIT WHEN L_LONG_LEN = 0;
+			
+				L_LONG_PIECE := L_LONG_PIECE || L_LONG_VAL; -- added
+			
+			END LOOP;
+		END IF;
+		DBMS_SQL.CLOSE_CURSOR(L_CURSOR); -- added
+	
+		RETURN L_LONG_PIECE;
+	EXCEPTION
+		WHEN OTHERS THEN
+			IF DBMS_SQL.IS_OPEN(L_CURSOR) THEN
+				DBMS_SQL.CLOSE_CURSOR(L_CURSOR);
+			END IF;
+			RAISE;
+	END LONG_COLUMN;
+
+	-- Moves partitions for a date range from source table to destination table using a temporary table 
+	PROCEDURE MOVE_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_SOURCE_TABLE VARCHAR2, P_TEMP_TABLE VARCHAR2, P_DEST_TABLE VARCHAR2, P_FROM IN DATE, P_TO IN DATE) IS
+		TRUNC_FROM               DATE;
+		TRUNC_TO                 DATE;
+		NUM_DAYS                 NUMBER;
+		L_DUMMY                  NUMBER;
+		L_PARTITION_COLUMN       VARCHAR2(30) := GET_PARTITION_COLUMN(P_OWNER      => P_OWNER,
+																																	P_TABLE_NAME => P_DEST_TABLE);
+		L_FULL_SOURCE_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_SOURCE_TABLE;
+		L_FULL_TEMP_TABLE_NAME   VARCHAR2(61) := P_OWNER || '.' || P_TEMP_TABLE;
+		L_FULL_DEST_TABLE_NAME   VARCHAR2(61) := P_OWNER || '.' || P_DEST_TABLE;
+	BEGIN
+	
+		TRUNC_FROM := TRUNC(P_FROM);
+		TRUNC_TO   := TRUNC(P_TO);
+	
+		NUM_DAYS := TRUNC_TO - TRUNC_FROM;
+	
+		-- Check if rows exist for specified dates in destination table
+		-- and raise error if exist
+		FOR I IN 0 .. NUM_DAYS LOOP
+		
+			BEGIN
+				EXECUTE IMMEDIATE 'SELECT 1 FROM ' || L_FULL_DEST_TABLE_NAME || ' where ' ||
+													L_PARTITION_COLUMN || ' between :1 and :2 + 1 and rownum < 2'
+					INTO L_DUMMY
+					USING TRUNC_FROM + I, TRUNC_FROM + I;
+				RAISE_APPLICATION_ERROR(-20000,
+																'Found rows in both destination table ' || L_FULL_DEST_TABLE_NAME ||
+																' for date ' || TO_CHAR(TRUNC_FROM + I,
+																												'dd/mm/yyyy'));
+			
+			EXCEPTION
+				WHEN NO_DATA_FOUND THEN
+					NULL;
+			END;
+		
+		END LOOP;
+	
+		-- for each day
+		FOR I IN 0 .. NUM_DAYS LOOP
+		
+			-- try to create partition for current day in dest table by inserting a dummy row FROM SOURCE TABLE.
+			-- the ADD_PARTITION procedure is not used to avoid creating partitions for empty dates in source table
+			EXECUTE IMMEDIATE 'INSERT INTO ' || L_FULL_DEST_TABLE_NAME || '
+				SELECT *
+				FROM   ' || L_FULL_SOURCE_TABLE_NAME || '
+				WHERE  ' || L_PARTITION_COLUMN || ' BETWEEN :1 AND :2 + 1
+				AND    ROWNUM < 2'
+				USING TRUNC_FROM + I, TRUNC_FROM + I;
+		
+			-- if partition was created (row inserted into dest table)
+			IF SQL%ROWCOUNT > 0 THEN
+			
+				-- rollback insert
+				ROLLBACK;
+			
+				-- exchange source partition with temp table
+				EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_SOURCE_TABLE_NAME ||
+													' exchange PARTITION FOR (to_date(''' ||
+													TO_CHAR(TRUNC_FROM + I,
+																	'dd/mm/yyyy') || ''',''dd/mm/yyyy'') ) WITH TABLE ' ||
+													L_FULL_TEMP_TABLE_NAME || ' INCLUDING INDEXES WITHOUT VALIDATION';
+			
+				-- exchange destiniation partition with temp table
+				EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_DEST_TABLE_NAME ||
+													' exchange PARTITION FOR (to_date(''' ||
+													TO_CHAR(TRUNC_FROM + I,
+																	'dd/mm/yyyy') || ''',''dd/mm/yyyy'') ) WITH TABLE ' ||
+													L_FULL_TEMP_TABLE_NAME || ' INCLUDING INDEXES WITHOUT VALIDATION';
+			
+				-- drop partition from source table
+				EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_SOURCE_TABLE_NAME ||
+													' DROP PARTITION FOR (to_date(''' ||
+													TO_CHAR(TRUNC_FROM + I,
+																	'dd/mm/yyyy') || ''',''dd/mm/yyyy'') )';
+			END IF;
+		
+		END LOOP;
+		COMMIT;
+	END MOVE_PARTITIONS_FOR_DATES;
+
+	PROCEDURE DROP_PARTITIONS_FOR_DATES(P_OWNER IN VARCHAR2, P_TABLE VARCHAR2, P_FROM IN DATE, P_TO IN DATE) IS
+		TRUNC_FROM        DATE;
+		TRUNC_TO          DATE;
+		NUM_DAYS          NUMBER;
+		L_DUMMY           NUMBER;
+		L_TABLESPACE_NAME VARCHAR2(30);
+		L_FULL_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+	BEGIN
+		TRUNC_FROM := TRUNC(P_FROM);
+		TRUNC_TO   := TRUNC(P_TO);
+	
+		NUM_DAYS := TRUNC_TO - TRUNC_FROM;
+	
+		-- FOR EACH DAY
+		FOR I IN 0 .. NUM_DAYS LOOP
+		
+			-- Get tablespace name (if partition exists)
+			IF EXISTS_PARTITION(P_OWNER,
+													P_TABLE,
+													TRUNC_FROM + I) THEN
+			
+				BEGIN
+					SELECT TABLESPACE_NAME
+					INTO   L_TABLESPACE_NAME
+					FROM   DBA_TAB_PARTITIONS T
+					WHERE  T.TABLE_OWNER = P_OWNER
+					AND    T.TABLE_NAME = P_TABLE
+					AND    T.PARTITION_NAME = GET_PARTITION_NAME(P_OWNER,
+																											 P_TABLE,
+																											 TRUNC_FROM + I);
+				EXCEPTION
+					WHEN NO_DATA_FOUND THEN
+						L_TABLESPACE_NAME := NULL;
+				END;
+			
+			END IF;
+		
+			-- Drop the partition and ignore if partition is missing
+			BEGIN
+				EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME || ' DROP PARTITION FOR (to_date(''' ||
+													TO_CHAR(TRUNC_FROM + I,
+																	'dd/mm/yyyy') || ''',''dd/mm/yyyy'') )';
+			
+			EXCEPTION
+				WHEN OTHERS THEN
+					IF SQLCODE = -14758 OR SQLCODE = -02149 /* no partition for this date */
+					 THEN
+						NULL;
+					ELSE
+						RAISE;
+					END IF;
+			END;
+		
+			-- If partition existed
+			IF L_TABLESPACE_NAME IS NOT NULL THEN
+				BEGIN
+				
+					-- Select segments for this tablespace
+					SELECT 1
+					INTO   L_DUMMY
+					FROM   DBA_SEGMENTS T
+					WHERE  T.TABLESPACE_NAME = L_TABLESPACE_NAME
+					AND    ROWNUM < 2;
+				EXCEPTION
+				
+					-- If no segments remained on tablespace 
+					WHEN NO_DATA_FOUND THEN
+					
+						-- Drop tablespace and datafile
+						EXECUTE IMMEDIATE 'DROP TABLESPACE ' || L_TABLESPACE_NAME ||
+															' INCLUDING CONTENTS AND DATAFILES';
+					
+				END;
+			END IF;
+		
+		END LOOP;
+	END DROP_PARTITIONS_FOR_DATES;
+
+	PROCEDURE ADD_PARTITION(P_OWNER IN VARCHAR2, P_TABLE IN VARCHAR2, P_DATE IN DATE) IS
+		L_INSERT_STATEMENT VARCHAR2(32767);
+		L_FULL_TABLE_NAME  VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+	BEGIN
+	
+		IF EXISTS_PARTITION(P_OWNER,
+												P_TABLE,
+												P_DATE) THEN
+			RAISE_APPLICATION_ERROR(-20006,
+															'Partition exists for date ' ||
+															TO_CHAR(P_DATE,
+																			'dd/mm/yyyy'));
+		END IF;
+	
+		SELECT 'INSERT INTO ' || L_FULL_TABLE_NAME || ' values (' || WM_CONCAT(DATA) || ')'
+		INTO   L_INSERT_STATEMENT
+		FROM   (SELECT CASE
+										 WHEN T.COLUMN_NAME =
+													GET_PARTITION_COLUMN(P_OWNER      => P_OWNER,
+																							 P_TABLE_NAME => P_TABLE) THEN
+											'to_date(''' || TO_CHAR(P_DATE,
+																							'dd/mm/yyyy') || ''',''dd/mm/yyyy'')'
+										 WHEN T.NULLABLE = 'Y' THEN
+											'NULL'
+										 WHEN T.DATA_TYPE = 'NUMBER' THEN
+											TO_CHAR(-999)
+										 WHEN T.DATA_TYPE = 'DATE' OR T.DATA_TYPE LIKE 'TIMESTAMP%' THEN
+											'to_date(''' || TO_CHAR(SYSDATE,
+																							'dd/mm/yyyy') || ''',''dd/mm/yyyy'')'
+										 WHEN T.DATA_TYPE = 'VARCHAR2' THEN
+											'X'
+									 END DATA,
+									 T.NULLABLE
+						FROM   DBA_TAB_COLUMNS T
+						WHERE  TABLE_NAME = P_TABLE
+						AND    T.OWNER = P_OWNER
+						ORDER  BY COLUMN_ID ASC);
+	
+		DBMS_OUTPUT.PUT_LINE(L_INSERT_STATEMENT);
+		EXECUTE IMMEDIATE L_INSERT_STATEMENT;
+		ROLLBACK;
+	
+	END ADD_PARTITION;
+
+	-- Refactored procedure CONSTRACT_PARTITION_NAME 
+	FUNCTION CONSTRUCT_PARTITION_NAME(P_OWNER IN VARCHAR2, P_TABLE IN VARCHAR2, P_DATE IN DATE)
+		RETURN VARCHAR2 IS
+		L_PREFIX         VARCHAR2(19);
+		L_PARTITION_NAME VARCHAR2(30);
+	BEGIN
+		BEGIN
+			SELECT PREFIX
+			INTO   L_PREFIX
+			FROM   PARTITION_NAMING T
+			WHERE  T.SCHEMA_NAME = P_OWNER
+			AND    T.TABLE_NAME = P_TABLE;
+		
+		EXCEPTION
+			WHEN NO_DATA_FOUND THEN
+				RAISE_APPLICATION_ERROR(-20005,
+																'No prefix defined for table. Please define a prefix in dba_apps.partition_naming');
+		END;
+	
+		L_PARTITION_NAME := L_PREFIX || '_' || TO_CHAR(P_DATE,
+																									 L_DATE_FORMAT);
+		RETURN L_PARTITION_NAME;
+	END CONSTRUCT_PARTITION_NAME;
+
+	-- Refactored procedure RENAME_PARTITION 
+	PROCEDURE RENAME_PARTITION(P_OWNER IN VARCHAR2, P_TABLE IN VARCHAR2, P_DATE IN DATE, P_NAME IN VARCHAR2 DEFAULT NULL) IS
+		L_PARTITION_NAME  VARCHAR2(30);
+		L_FULL_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+	BEGIN
+		IF P_NAME IS NULL THEN
+			L_PARTITION_NAME := CONSTRUCT_PARTITION_NAME(P_OWNER,
+																									 P_TABLE,
+																									 P_DATE);
+		
+			EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME || ' RENAME PARTITION ' ||
+												GET_PARTITION_NAME(P_OWNER,
+																					 P_TABLE,
+																					 P_DATE) || ' TO ' || L_PARTITION_NAME;
+		
+		ELSE
+			EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME || ' RENAME PARTITION ' ||
+												GET_PARTITION_NAME(P_OWNER,
+																					 P_TABLE,
+																					 P_DATE) || ' TO ' || P_NAME;
+		END IF;
+	END RENAME_PARTITION;
+
+	PROCEDURE ALLOCATE_PARTITION(P_OWNER IN VARCHAR2, P_TABLE IN VARCHAR2, P_DATE IN DATE, P_PATH IN VARCHAR2, P_GROWTH_FACTOR IN NUMBER DEFAULT 1) IS
+		L_PARTITION_NAME  USER_TAB_PARTITIONS.PARTITION_NAME%TYPE;
+		L_AVG_SIZE        NUMBER := 0;
+		L_FULL_TABLE_NAME VARCHAR2(61) := P_OWNER || '.' || P_TABLE;
+		L_FULL_IND_NAME   VARCHAR2(61);
+	BEGIN
+	
+		-- Rename partition by convention
+		RENAME_PARTITION(P_OWNER,
+										 P_TABLE,
+										 P_DATE);
+	
+		-- Get partition new name 
+		L_PARTITION_NAME := GET_PARTITION_NAME(P_OWNER      => P_OWNER,
+																					 P_TABLE_NAME => P_TABLE,
+																					 P_DATE       => P_DATE);
+	
+		--  Create tablespace named as the partition with indentical file name
+		EXECUTE IMMEDIATE 'CREATE TABLESPACE ' || L_PARTITION_NAME || ' DATAFILE  ''' || P_PATH ||
+											L_PARTITION_NAME || '.dbf'' SIZE 200M AUTOEXTEND ON';
+	
+		--  move partition into new tablespace
+		EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME|| ' MOVE PARTITION ' ||
+											L_PARTITION_NAME || '  TABLESPACE ' || L_PARTITION_NAME;
+	
+		-- Avg size of last 5 partitions in MB 
+		WITH A AS
+		 (SELECT TABLE_OWNER, TABLE_NAME, PARTITION_NAME
+			FROM   (SELECT T.*
+							FROM   DBA_TAB_PARTITIONS T
+							WHERE  T.TABLE_OWNER = P_OWNER
+							AND    T.TABLE_NAME = P_TABLE
+							AND    T.PARTITION_NAME <> L_PARTITION_NAME
+							AND    T.PARTITION_NAME <> 'FIRST_PART'
+							ORDER  BY T.PARTITION_POSITION DESC)
+			WHERE  ROWNUM < 6),
+		B AS
+		 (SELECT DS.OWNER, DS.SEGMENT_NAME, DS.PARTITION_NAME, SUM(BYTES) / 1024 / 1024 MB
+			FROM   DBA_SEGMENTS DS, A
+			WHERE  DS.OWNER = A.TABLE_OWNER
+			AND    DS.SEGMENT_NAME = A.TABLE_NAME
+			AND    DS.PARTITION_NAME = A.PARTITION_NAME
+			GROUP  BY DS.OWNER, DS.SEGMENT_NAME, DS.PARTITION_NAME)
+		SELECT AVG(MB) INTO L_AVG_SIZE FROM B;
+	
+		-- Allocate the extent                                                      
+		EXECUTE IMMEDIATE 'ALTER TABLE ' || L_FULL_TABLE_NAME || '  MODIFY PARTITION ' ||
+											L_PARTITION_NAME || ' ALLOCATE EXTENT (SIZE ' ||
+											TRUNC((L_AVG_SIZE + 1) * NVL(P_GROWTH_FACTOR,
+																									 1)) || 'M)';
+	
+		-- For each partitioned index on table
+		FOR IND_REC IN (SELECT T.INDEX_NAME
+										FROM   DBA_INDEXES T
+										WHERE  T.OWNER = P_OWNER
+										AND    T.TABLE_NAME = P_TABLE
+										AND    T.PARTITIONED = 'YES'
+										AND    T.INDEX_TYPE = 'NORMAL') LOOP
+		
+			L_FULL_IND_NAME := P_OWNER || '.' || IND_REC.INDEX_NAME;
+		
+			-- Avg size of last 5 partitions in MB 
+			WITH A AS
+			 (SELECT INDEX_OWNER, INDEX_NAME, PARTITION_NAME
+				FROM   (SELECT T.*
+								FROM   DBA_IND_PARTITIONS T
+								WHERE  T.INDEX_OWNER = P_OWNER
+								AND    T.INDEX_NAME = IND_REC.INDEX_NAME
+								ORDER  BY T.PARTITION_POSITION DESC)
+				WHERE  ROWNUM < 6),
+			B AS
+			 (SELECT DS.OWNER, DS.SEGMENT_NAME, DS.PARTITION_NAME, SUM(BYTES) / 1024 / 1024 MB
+				FROM   DBA_SEGMENTS DS, A
+				WHERE  DS.OWNER = A.INDEX_OWNER
+				AND    DS.SEGMENT_NAME = A.INDEX_NAME
+				AND    DS.PARTITION_NAME = A.PARTITION_NAME
+				GROUP  BY DS.OWNER, DS.SEGMENT_NAME, DS.PARTITION_NAME)
+			SELECT AVG(MB) INTO L_AVG_SIZE FROM B;
+		
+			L_PARTITION_NAME := CONSTRUCT_PARTITION_NAME(P_OWNER,
+																									 P_TABLE,
+																									 P_DATE);
+		
+			-- rename by convention                                                   
+			EXECUTE IMMEDIATE 'ALTER index ' || L_FULL_IND_NAME || '  RENAME PARTITION ' ||
+												GET_IND_PARTITION_NAME(P_OWNER,
+																							 IND_REC.INDEX_NAME,
+																							 P_DATE) || ' to ' || L_PARTITION_NAME;
+		
+			-- Move  to tablespace
+			EXECUTE IMMEDIATE 'ALTER index ' || L_FULL_IND_NAME || '  REBUILD PARTITION ' ||
+												L_PARTITION_NAME || ' tablespace ' || L_PARTITION_NAME;
+		
+			-- Allocate the extent                                                      
+			EXECUTE IMMEDIATE 'ALTER index ' || L_FULL_IND_NAME || '  MODIFY PARTITION ' ||
+												L_PARTITION_NAME || ' ALLOCATE EXTENT (SIZE ' ||
+												TRUNC((L_AVG_SIZE + 1) * NVL(P_GROWTH_FACTOR,
+																										 1)) || 'M)';
+		END LOOP;
+	END ALLOCATE_PARTITION;
+END PARTITION_MANAGER;
+/
+
+GRANT EXECUTE ON PARTITION_MANAGER TO PUBLIC;
+CREATE PUBLIC SYNONYM PARTITION_MANAGER FOR PARTITION_MANAGER;

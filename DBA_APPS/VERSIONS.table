@@ -1,0 +1,7 @@
+create table VERSIONS
+(
+  COMPONENT_NAME     varchar2(300) not null,
+  VERSION            varchar2(30)  not null,
+  UPDATE_TIME        date          not null
+)
+/

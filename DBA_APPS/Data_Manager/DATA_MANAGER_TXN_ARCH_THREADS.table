@@ -1,0 +1,40 @@
+create table DATA_MANAGER_TXN_ARCH_THREADS
+(
+  THREAD_NUMBER     number                       not null,
+  THREAD_ID         number                       not null,
+  START_TIME        date         default SYSDATE not null,
+  CLIENT            varchar2(90)                 not null,
+  TIME_LIMIT_MIN    number                       not null,
+  SLEEP_SEC         number                       not null,
+  CHUNK_SIZE        number                       not null,
+  ARCHIVED_ROWS     number       default 0       not null,
+  END_TIME          date,
+  IS_CLOSED         number(1)    default 0       not null,
+  IS_FINISHED       number(1)    default 0       not null,
+  IS_TIMED_OUT      number(1)    default 0       not null,
+  IS_TERMINATED     number(1)    default 0       not null,
+  IS_STOP_AT_FINISH number(1)    default 0       not null, 
+  IS_ERROR          number(1)    default 0       not null,
+  ERROR             varchar2(200) 
+)
+/
+
+create unique index DATA_MANAGER_TAT_IDXPK on DATA_MANAGER_TXN_ARCH_THREADS(THREAD_ID) REVERSE
+/
+
+alter table DATA_MANAGER_TXN_ARCH_THREADS add constraint DATA_MANAGER_TAT_PK primary key (THREAD_ID) using index DATA_MANAGER_TAT_IDXPK
+/
+
+create index DATA_MANAGER_TAT_IDXPK_IDX1 on DATA_MANAGER_TXN_ARCH_THREADS(CLIENT,
+                                                                          IS_CLOSED, 
+                                                                          IS_FINISHED, 
+                                                                          IS_TIMED_OUT,
+                                                                          IS_TERMINATED,
+                                                                          IS_ERROR)
+/
+
+grant all on DATA_MANAGER_TXN_ARCH_THREADS to PUBLIC
+/
+
+create public synonym DATA_MANAGER_TXN_ARCH_THREADS for DATA_MANAGER_TXN_ARCH_THREADS
+/

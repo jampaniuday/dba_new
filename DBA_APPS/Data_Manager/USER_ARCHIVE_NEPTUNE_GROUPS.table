@@ -1,0 +1,11 @@
+CREATE TABLE USER_ARCHIVE_NEPTUNE_GROUPS 
+ (NEPTUNE_GROUP_ID number,
+  VIEW_NAME  varchar2(40));
+
+grant insert, update, delete on USER_ARCHIVE_NEPTUNE_GROUPS to DBA_APPS;
+
+grant select on USER_ARCHIVE_NEPTUNE_GROUPS to public;
+
+grant select, update, delete  on USER_ARCHIVE_NEPTUNE_GROUPS to dba_apps with grant option;
+
+

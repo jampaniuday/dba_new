@@ -1,0 +1,77 @@
+CREATE OR REPLACE PROCEDURE DBA_APPS.refresh_allgs_tables IS
+    cmd  varchar2(32000) := 'create or replace view ALL_GS_HISTOGRAMS as ';
+    cmd1  varchar2(32000) := 'create or replace view ALL_GS_SET_COLUMNS as ';
+    aad_cols varchar2(1000);
+begin
+    FOR part
+    IN (select owner, table_name
+        from dba_tables
+        where table_name = 'GS_HISTOGRAMS'
+        order by owner)
+    LOOP
+      if cmd = 'create or replace view ALL_GS_HISTOGRAMS as ' then  
+        -- first table
+        select listagg(column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols
+            into aad_cols
+            from dba_tab_columns
+            where table_name = 'GS_HISTOGRAMS'
+            and owner =  part.owner
+            and column_name <> 'OWNER'
+            order by column_id;
+
+        cmd := cmd || 'select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      else
+        cmd := cmd || ' union all select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      end if;
+    END LOOP;
+
+
+execute immediate (cmd);
+ DBMS_OUTPUT.PUT_LINE( cmd);
+
+    FOR part
+    IN (select owner, table_name
+        from dba_tables
+        where table_name = 'GS_SET_COLUMNS'
+        order by owner)
+    LOOP
+      if cmd1 = 'create or replace view ALL_GS_SET_COLUMNS as ' then  
+        -- first table
+        select listagg(column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols
+            into aad_cols
+            from dba_tab_columns
+            where table_name = 'GS_SET_COLUMNS'
+            and owner =  part.owner
+            and column_name <> 'OWNER'
+            order by column_id;
+
+        cmd1 := cmd1 || 'select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      else
+        cmd1 := cmd1 || ' union all select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+      end if;
+    END LOOP;
+
+    execute immediate (cmd);    
+ 
+execute immediate (cmd1);
+ DBMS_OUTPUT.PUT_LINE( cmd1);
+
+----- grants
+
+EXECUTE IMMEDIATE 'create or replace public synonym ALL_GS_HISTOGRAMS FOR ALL_GS_HISTOGRAMS';
+
+EXECUTE IMMEDIATE 'create or replace public synonym ALL_GS_SET_COLUMNS FOR ALL_GS_SET_COLUMNS';
+
+EXECUTE IMMEDIATE 'grant select on ALL_GS_HISTOGRAMS to public';
+
+EXECUTE IMMEDIATE 'grant select on ALL_GS_SET_COLUMNS to public';
+
+
+end;
+/
+
+BEGIN
+    dba_apps.refresh_allgs_tables;
+
+END;
+/

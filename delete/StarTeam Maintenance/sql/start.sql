@@ -1,0 +1,4 @@
+startup open;
+
+exit;
+

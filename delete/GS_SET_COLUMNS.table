@@ -1,0 +1,31 @@
+CREATE TABLE GS_SET_COLUMNS
+(
+  APP                          VARCHAR2(30) NOT NULL,
+  OWNER                        VARCHAR2(30),
+  TABLE_NAME                   VARCHAR2(30) NOT NULL,
+  COLUMN_NAME                  VARCHAR2(30) NOT NULL,
+  DATA_TYPE                    VARCHAR2(20) NOT NULL,
+  HIGH_VALUE_NUMBER            NUMBER,
+  LOW_VALUE_NUMBER             NUMBER,
+  HIGH_VALUE_DATE              DATE,
+  LOW_VALUE_DATE               DATE,
+  HIGH_VALUE_DATE_OFFSET       NUMBER,
+  LOW_VALUE_DATE_OFFSET        NUMBER,
+  DISTINCT_VALUES              NUMBER,
+  DENSITY                      NUMBER,
+  NULLS                        NUMBER,
+  AVG_LEN_BYTES                NUMBER
+)
+/
+
+GRANT SELECT ON GS_SET_COLUMNS TO PUBLIC
+/
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM GS_SET_COLUMNS FOR GS_SET_COLUMNS';
+exception
+  when OTHERS then
+    null;
+end;
+/
+

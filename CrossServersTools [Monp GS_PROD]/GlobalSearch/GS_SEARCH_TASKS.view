@@ -1,0 +1,3 @@
+CREATE OR REPLACE FORCE VIEW GS_SEARCH_TASKS AS
+SELECT id, search_uid, type_det_id, search_query, result_count, result, creation_time, start_time, duration, GS_SEARCH_SERVER_PKG.GS_TASK_STATUS(ID) "STATUS", error_msg, execution_order
+FROM GS_SEARCH_TASKS_TBL;

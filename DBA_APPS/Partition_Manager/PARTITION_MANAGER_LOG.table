@@ -1,0 +1,73 @@
+declare
+  l_is_ee number;
+  l_cmd   varchar2(30000);
+begin
+    
+
+	l_cmd := 'CREATE TABLE PARTITION_MANAGER_LOG( ' ||
+			  'ID				  NUMBER	     NOT NULL, ' ||
+			  'SCHEMA_NAME        VARCHAR2(60), ' ||
+			  'OPERATION_TIME     TIMESTAMP(6)   NOT NULL, ' ||
+			  'COMPONENT          VARCHAR2(100)  NOT NULL, ' ||
+			  'TABLE_NAME         VARCHAR2(40), ' ||
+			  'RETURN_CODE        NUMBER         NOT NULL, ' ||
+			  'RETURN_MESSAGE     VARCHAR2(2000) NOT NULL, ' ||
+			  'TOTAL_TIME_MS      NUMBER';
+			  
+	select count(*) 
+	into   l_is_ee 
+	from dba_tab_partitions
+	where table_name = 'MSG_QUEUE_IN'
+	and rownum <2;
+	
+	if l_is_ee > 0 then
+	  l_cmd := l_cmd || ', ARRIVAL_MONTH		 AS (TO_CHAR(OPERATION_TIME, ''MM''))) ' ||
+					'PARTITION BY RANGE (ARRIVAL_MONTH) ' ||
+					'( PARTITION PM_LOG_JAN_P VALUES LESS THAN (''02''), ' ||
+					  'PARTITION PM_LOG_FEB_P VALUES LESS THAN (''03''), ' ||
+					  'PARTITION PM_LOG_MAR_P VALUES LESS THAN (''04''), ' ||
+					  'PARTITION PM_LOG_APR_P VALUES LESS THAN (''05''), ' ||
+					  'PARTITION PM_LOG_MAY_P VALUES LESS THAN (''06''), ' ||
+					  'PARTITION PM_LOG_JUN_P VALUES LESS THAN (''07''), ' ||
+					  'PARTITION PM_LOG_JUL_P VALUES LESS THAN (''08''), ' ||
+					  'PARTITION PM_LOG_AUG_P VALUES LESS THAN (''09''), ' ||
+					  'PARTITION PM_LOG_SEP_P VALUES LESS THAN (''10''), ' ||
+					  'PARTITION PM_LOG_OCT_P VALUES LESS THAN (''11''), ' ||
+					  'PARTITION PM_LOG_NOV_P VALUES LESS THAN (''12''), ' ||
+					  'PARTITION PM_LOG_DEC_P VALUES LESS THAN (''13'') ' ;
+	end if;
+	
+	l_cmd := l_cmd || ')';
+	dbms_output.put_line (l_cmd);
+	execute immediate (l_cmd);
+	
+	select 'CREATE INDEX PM_LOG_COMPONENT_IDX ON PARTITION_MANAGER_LOG (COMPONENT, TABLE_NAME) ' || decode(l_is_ee, '1', 'local', ' ')
+    into l_cmd
+    from dual;
+     
+	dbms_output.put_line (l_cmd);
+	execute immediate (l_cmd);
+	
+	select 'CREATE INDEX PM_LOG_TIME_IDX ON PARTITION_MANAGER_LOG (OPERATION_TIME) ' || decode(l_is_ee, '1', 'local', ' ')
+    into l_cmd
+    from dual;
+     
+	dbms_output.put_line (l_cmd);
+	execute immediate (l_cmd);
+	
+	select 'CREATE INDEX PM_LOG_TABLE_NAME_IDX ON PARTITION_MANAGER_LOG (TABLE_NAME) ' || decode(l_is_ee, '1', 'local', ' ')
+    into l_cmd
+    from dual;
+    
+	dbms_output.put_line (l_cmd);
+	execute immediate (l_cmd);
+	
+	
+end;
+/
+
+grant select, insert, delete, update on PARTITION_MANAGER_LOG to PUBLIC;
+
+create or replace public synonym PARTITION_MANAGER_LOG  for PARTITION_MANAGER_LOG ;
+
+

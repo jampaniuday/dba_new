@@ -1,0 +1,5 @@
+create table SC_EXCLUDED_SCHEMAS
+(
+  SCHEMA_NAME varchar2(60) not null
+)
+/

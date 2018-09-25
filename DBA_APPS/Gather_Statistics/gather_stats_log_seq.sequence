@@ -1,0 +1,5 @@
+CREATE SEQUENCE gather_stats_log_seq
+ START WITH     1000
+ INCREMENT BY   1
+ CACHE 1000
+ NOCYCLE;

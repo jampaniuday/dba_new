@@ -1,0 +1,601 @@
+CREATE OR REPLACE PACKAGE QA_PAR_FILES_PKG AS
+
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'QA_PAR_FILES_PKG';
+  VERSION       CONSTANT VARCHAR2(30) := '1.0';
+
+ FUNCTION qa_proccess_string  (V_ACTION_ID IN number) RETURN VARCHAR2;
+ 
+ FUNCTION qa_proccess_string_template  (V_DUMP_ID IN NUMBER,V_ACTION_ID IN number) RETURN VARCHAR2;
+ 
+ FUNCTION qa_proccess_write (V_DUMP_ID IN number) RETURN NUMBER;
+ 
+ FUNCTION read_file_clob (V_FILE_NAME IN varchar2) return CLOB;
+ 
+ PROCEDURE qa_proccess_read (V_DUMP_ID IN number);
+ 
+ PROCEDURE qa_deploy_remote (V_DUMP_ID IN number);
+ 
+ PROCEDURE import_new_template (var_file_name IN VARCHAR2, V_NEW_TEMPLATE_NAME IN VARCHAR2,V_DESCRIPTION IN VARCHAR2 default null);
+ 
+ PROCEDURE qa_import_parfile;
+ 
+ PROCEDURE qa_import_parfile_to_dump;
+ 
+ PROCEDURE import_new_dump (var_file_name IN VARCHAR2, v_schema_name IN VARCHAR2,v_dump_type IN VARCHAR2);
+ 
+END QA_PAR_FILES_PKG;
+/
+
+CREATE OR REPLACE PACKAGE BODY QA_PAR_FILES_PKG AS
+
+PROCEDURE import_new_dump (var_file_name IN VARCHAR2, v_schema_name IN VARCHAR2,v_dump_type IN VARCHAR2) IS
+      var_clob clob;
+      var_clob_line varchar2(4000);
+      var_clob_line_count number;
+      v_action_type varchar2(30);
+      v_query varchar2(4000);
+      v_object_name varchar2(1000);
+      v_object_type varchar2(1000);
+      v_operator_type varchar2(10);
+      v_first_char number;
+      v_last_char number;
+      v_delta_char number;
+      v_length number;
+      v_seq number;
+begin
+
+-- create new Main dump
+v_seq := QA_PAR_SEQ.nextval;
+insert into QA_PAR_FILES_MAIN (DUMP_ID,CREATION_DATE,SCHEMA_NAME,DUMP_TYPES,STATUS)
+values (v_seq,sysdate,v_schema_name,v_dump_type,1);
+
+var_clob  := read_file_clob(var_file_name);
+
+      var_clob_line_count := length(var_clob) - nvl(length(replace(var_clob,chr(10))),0) + 1;
+      for i in 1.. var_clob_line_count loop
+        var_clob_line := regexp_substr(var_clob,'^.*$',1,i,'m');
+        
+        
+      IF instr(var_clob_line,'"LIKE''',1) >0  THEN
+      v_operator_type := 'LIKE';
+      
+      ELSIF  instr(var_clob_line,'"IN',1) >0  THEN
+       v_operator_type := 'IN';
+       
+      ELSIF  instr(var_clob_line,'<>',1) >0  OR instr(var_clob_line,'!=>',1) >0 THEN
+       v_operator_type := '<>';
+       
+       ELSE   v_operator_type := '=';
+       
+      END IF;
+                
+              
+              --dbms_output.put_line(var_clob_line);
+              
+      IF instr(var_clob_line,'EXCLUDE',1) >0  THEN
+      v_action_type := 'EXCLUDE';
+                           
+      ELSIF instr(var_clob_line,'QUERY',1)>0 THEN
+      v_action_type := 'QUERY';
+              
+      ELSIF  instr(var_clob_line,'INCLUDE',1)>0 THEN
+      v_action_type := 'INCLUDE';
+
+      END IF;
+              
+      IF instr(var_clob_line,'TABLE_DATA',1) >0  THEN
+      v_object_type  := 'TABLE_DATA';
+      ELSE
+      v_object_type  := 'TABLE';        
+      END IF;
+      
+     
+      IF v_operator_type = 'IN' AND v_action_type != 'QUERY' THEN
+      v_first_char   := INSTR(var_clob_line, '(',1,1)+1;
+      v_last_char    := INSTR(var_clob_line, ')',-1,1);
+      v_delta_char  := v_last_char-v_first_char;
+      
+      v_object_name         :=  substr(var_clob_line,v_first_char,v_delta_char);
+      --dbms_output.put_line (v_object_name);
+      --v_object_name := NULL;
+      
+      END IF;
+      
+      IF v_action_type = 'QUERY' THEN
+      v_first_char   := INSTR(var_clob_line, '"',1,1)+1;
+      v_last_char    := INSTR(var_clob_line, '"',-1,1);
+      v_delta_char  := v_last_char-v_first_char;
+      
+      v_query         :=  substr(var_clob_line,v_first_char,v_delta_char);
+         --dbms_output.put_line (v_query);
+         --v_query := NULL;
+         
+      v_first_char   := INSTR(var_clob_line, '.',1,1)+1;
+      --dbms_output.put_line (v_first_char);
+      v_last_char    := INSTR(var_clob_line, ':',-1,1);
+      --dbms_output.put_line (v_last_char);
+      v_delta_char  := v_last_char-v_first_char;
+      --dbms_output.put_line (v_delta_char);
+          
+      v_object_name         :=  substr(var_clob_line,v_first_char,v_delta_char);
+      
+      END IF;
+
+
+      IF v_action_type != 'QUERY' and v_operator_type != 'IN'  THEN
+          v_first_char   := INSTR(var_clob_line, '''',1,1)+1;
+          v_last_char    := INSTR(var_clob_line, '''',-1,1);
+          v_delta_char  := v_last_char-v_first_char;
+          
+          v_object_name         :=  substr(var_clob_line,v_first_char,v_delta_char);
+          --dbms_output.put_line (v_object_name);
+          --v_object_name := NULL;
+      
+      END IF;
+       
+
+-- Populate dump
+     IF v_object_name is not null OR v_query is not null THEN
+    INSERT INTO QA_PAR_FILES_ACTIONS (DUMP_ID, ACTION_TYPE, OPERATOR_TYPE, OBJECT_TYPE, OBJECT_NAME, QUERY_TEXT, STATUS, TEMPLATE_NAME)
+    VALUES (v_seq,v_action_type,v_operator_type,v_object_type,v_object_name,v_query,1,NULL);
+    commit;
+     END IF;
+    v_query := NULL;
+    v_object_name := NULL;
+    
+
+
+      end loop;
+end import_new_dump;
+
+
+procedure import_new_template (var_file_name IN VARCHAR2, V_NEW_TEMPLATE_NAME IN VARCHAR2,V_DESCRIPTION IN VARCHAR2 default null) IS
+      var_clob clob;
+      var_clob_line varchar2(4000);
+      var_clob_line_count number;
+      v_dump_type varchar2(30);
+      v_action_type varchar2(30);
+      v_query varchar2(4000);
+      v_object_name varchar2(1000);
+      v_operator_type varchar2(10);
+      v_first_char number;
+      v_last_char number;
+      v_delta_char number;
+      v_length number;
+      v_seq number;
+begin
+
+-- create new template
+v_seq := QA_PAR_SEQ.nextval;
+insert into QA_PAR_TEMPLATE_NAME (TEMPLATE_ID,TEMPLATE_NAME,DESCRIPTION)
+values (v_seq,V_NEW_TEMPLATE_NAME,V_DESCRIPTION);
+
+var_clob  := read_file_clob(var_file_name);
+
+      var_clob_line_count := length(var_clob) - nvl(length(replace(var_clob,chr(10))),0) + 1;
+      for i in 1.. var_clob_line_count loop
+        var_clob_line := regexp_substr(var_clob,'^.*$',1,i,'m');
+        
+        
+      IF instr(var_clob_line,'"LIKE''',1) >0  THEN
+      v_operator_type := 'LIKE';
+      
+      ELSIF  instr(var_clob_line,'"IN',1) >0  THEN
+       v_operator_type := 'IN';
+       
+      ELSIF  instr(var_clob_line,'<>',1) >0  OR instr(var_clob_line,'!=>',1) >0 THEN
+       v_operator_type := '<>';
+       
+       ELSE   v_operator_type := '=';
+       
+      END IF;
+                
+              
+              --dbms_output.put_line(var_clob_line);
+              
+      IF instr(var_clob_line,'EXCLUDE',1) >0  THEN
+      v_action_type := 'EXCLUDE';
+                           
+      ELSIF instr(var_clob_line,'QUERY',1)>0 THEN
+      v_action_type := 'QUERY';
+              
+      ELSIF  instr(var_clob_line,'INCLUDE',1)>0 THEN
+      v_action_type := 'INCLUDE';
+
+      END IF;
+              
+      IF instr(var_clob_line,'TABLE_DATA',1) >0  THEN
+      v_dump_type  := 'TABLE_DATA';
+      ELSE
+      v_dump_type  := 'TABLE';        
+      END IF;
+      
+     
+      IF v_operator_type = 'IN' AND v_action_type != 'QUERY' THEN
+      v_first_char   := INSTR(var_clob_line, '(',1,1)+1;
+      v_last_char    := INSTR(var_clob_line, ')',-1,1);
+      v_delta_char  := v_last_char-v_first_char;
+      
+      v_object_name         :=  substr(var_clob_line,v_first_char,v_delta_char);
+      dbms_output.put_line (v_object_name);
+      --v_object_name := NULL;
+      
+      END IF;
+      
+      IF v_action_type = 'QUERY' THEN
+      v_first_char   := INSTR(var_clob_line, '"',1,1)+1;
+      v_last_char    := INSTR(var_clob_line, '"',-1,1);
+      v_delta_char  := v_last_char-v_first_char;
+      
+      v_query         :=  substr(var_clob_line,v_first_char,v_delta_char);
+         dbms_output.put_line (v_query);
+         --v_query := NULL;
+      
+      END IF;
+
+
+      IF v_action_type != 'QUERY' and v_operator_type != 'IN'  THEN
+          v_first_char   := INSTR(var_clob_line, '''',1,1)+1;
+          v_last_char    := INSTR(var_clob_line, '''',-1,1);
+          v_delta_char  := v_last_char-v_first_char;
+          
+          v_object_name         :=  substr(var_clob_line,v_first_char,v_delta_char);
+          dbms_output.put_line (v_object_name);
+          --v_object_name := NULL;
+      
+      END IF;
+       
+
+-- Populate template
+     IF v_object_name is not null OR v_query is not null THEN
+    INSERT INTO QA_PAR_TEMPLATE_ACTIONS (TEMPLATE_ID, ACTION_TYPE, OPERATOR_TYPE, OBJECT_TYPE, OBJECT_NAME, QUERY_TEXT) 
+    VALUES (v_seq,v_action_type,v_operator_type,v_dump_type,v_object_name,v_query);
+    commit;
+     END IF;
+    v_query := NULL;
+    v_object_name := NULL;
+    
+
+
+      end loop;
+end import_new_template;
+
+FUNCTION qa_proccess_string_template (V_DUMP_ID IN NUMBER,V_ACTION_ID IN number) RETURN VARCHAR2 IS
+
+v_line varchar2(1000);
+v_action_type varchar2(30);
+v_operator varchar2(10);
+
+BEGIN
+
+select ACTION_TYPE,OPERATOR_TYPE
+into v_action_type,v_operator
+from QA_PAR_TEMPLATE_ACTIONS
+where ACTION_ID = V_ACTION_ID;
+
+    IF v_action_type = 'QUERY' THEN
+
+    select A.ACTION_TYPE||'='||M.SCHEMA_NAME||'.'||A.OBJECT_NAME||':"'||A.QUERY_TEXT||'"'
+    into v_line
+    from QA_PAR_TEMPLATE_ACTIONS A,QA_PAR_FILES_MAIN M
+    where ACTION_ID = V_ACTION_ID
+    and m.dump_id=V_DUMP_ID;
+   
+    ELSIF v_action_type <> 'QUERY' and v_operator = 'IN' THEN
+
+    select ACTION_TYPE||'='||OBJECT_TYPE||':"'||OPERATOR_TYPE||' ('||OBJECT_NAME||')"'
+    into v_line
+    from QA_PAR_TEMPLATE_ACTIONS 
+    where ACTION_ID = V_ACTION_ID;
+
+    ELSE
+
+    select ACTION_TYPE||'='||OBJECT_TYPE||':"'||OPERATOR_TYPE||''''||OBJECT_NAME||'''"'
+    into v_line
+    from QA_PAR_TEMPLATE_ACTIONS A
+    where ACTION_ID = V_ACTION_ID;
+
+    END IF;
+
+RETURN v_line;
+
+END qa_proccess_string_template;
+
+
+FUNCTION qa_proccess_string (V_ACTION_ID IN number) RETURN VARCHAR2 IS
+
+v_line varchar2(1000);
+v_action_type varchar2(30);
+v_operator varchar2(10);
+
+BEGIN
+
+select ACTION_TYPE,OPERATOR_TYPE
+into v_action_type,v_operator
+from QA_PAR_FILES_ACTIONS
+where ACTION_ID = V_ACTION_ID;
+
+    IF v_action_type = 'QUERY' THEN
+
+    select ACTION_TYPE||'='||SCHEMA_NAME||'.'||OBJECT_NAME||':"'||QUERY_TEXT||'"'
+    into v_line
+    from QA_PAR_FILES_ACTIONS A,QA_PAR_FILES_MAIN M
+    where ACTION_ID = V_ACTION_ID
+    and m.dump_id=a.dump_id;
+   
+
+    ELSIF v_action_type <> 'QUERY' and v_operator = 'IN' THEN
+
+    select ACTION_TYPE||'='||OBJECT_TYPE||':"'||OPERATOR_TYPE||' ('||OBJECT_NAME||')"'
+    into v_line
+    from QA_PAR_FILES_ACTIONS A,QA_PAR_FILES_MAIN M
+    where ACTION_ID = V_ACTION_ID
+    and m.dump_id=a.dump_id;
+
+    ELSE
+
+    select ACTION_TYPE||'='||OBJECT_TYPE||':"'||OPERATOR_TYPE||''''||OBJECT_NAME||'''"'
+    into v_line
+    from QA_PAR_FILES_ACTIONS A,QA_PAR_FILES_MAIN M
+    where ACTION_ID = V_ACTION_ID
+    and m.dump_id=a.dump_id;
+
+    END IF;
+
+RETURN v_line;
+
+END qa_proccess_string;
+
+
+FUNCTION qa_proccess_write (V_DUMP_ID IN number) RETURN NUMBER IS
+
+  fileHandler UTL_FILE.FILE_TYPE;
+  l_name varchar2(1000);
+  v_status number (1) default 1;
+  v_schema_name varchar2(30);
+  v_dump_type varchar2(30);
+BEGIN
+
+SELECT SCHEMA_NAME,DUMP_TYPES
+  INTO   v_schema_name,v_dump_type
+  FROM QA_PAR_FILES_MAIN
+ WHERE dump_id = V_DUMP_ID;
+ 
+l_name := v_schema_name||'_'||v_dump_type||'_'||V_DUMP_ID||'.par';
+
+  fileHandler := UTL_FILE.FOPEN('GSPROD_DIR',l_name, 'W');
+  fileHandler := UTL_FILE.FOPEN('GSPROD_DIR',l_name, 'A');
+  
+    FOR I IN (select QA_PAR_FILES_PKG.qa_proccess_string(ACTION_ID) TXT from QA_PAR_FILES_ACTIONS where dump_id = V_DUMP_ID and TEMPLATE_NAME is null and status =1) LOOP
+      
+      UTL_FILE.PUTF(fileHandler,I.TXT||CHR(10));
+      
+    END LOOP;
+
+    FOR I IN  (select QA_PAR_FILES_PKG.qa_proccess_string_template(V_DUMP_ID,QTA.ACTION_ID) TXT from QA_PAR_TEMPLATE_ACTIONS QTA ,QA_PAR_TEMPLATE_NAME QFM,QA_PAR_FILES_ACTIONS QA where QTA.template_id =QFM.template_id   and QA.TEMPLATE_NAME = QFM.template_name AND QA.dump_id = V_DUMP_ID and QA.template_name is not null) LOOP
+
+     UTL_FILE.PUTF(fileHandler,I.TXT||CHR(10));
+
+    END LOOP;
+
+
+  UTL_FILE.FCLOSE(fileHandler);
+
+RETURN v_status;
+
+EXCEPTION
+  WHEN utl_file.invalid_path THEN
+     raise_application_error(-20000, 'ERROR: Invalid PATH FOR file.');
+
+END qa_proccess_write;
+
+
+PROCEDURE qa_proccess_read (V_DUMP_ID IN number) AS
+
+p_directory VARCHAR2(100) default 'GSPROD_DIR';
+p_file_name VARCHAR2(1000);
+v_file UTL_FILE.FILE_TYPE;
+v_chars_read NUMBER;
+v_dest_clob CLOB;
+v_amount INTEGER := 32767;
+v_char_buffer VARCHAR2(32767);
+  v_schema_name varchar2(30);
+  v_dump_type varchar2(30);
+
+BEGIN
+SELECT SCHEMA_NAME,DUMP_TYPES
+  INTO   v_schema_name,v_dump_type
+  FROM QA_PAR_FILES_MAIN
+ WHERE dump_id = V_DUMP_ID;
+
+p_file_name := v_schema_name||'_'||v_dump_type||'_'||V_DUMP_ID||'.par';
+
+-- insert an empty CLOB
+UPDATE QA_PAR_FILES_MAIN
+SET PARFILE=  EMPTY_CLOB()
+WHERE dump_id = V_DUMP_ID;
+
+-- get the LOB locator of the CLOB
+SELECT PARFILE
+INTO v_dest_clob
+FROM QA_PAR_FILES_MAIN
+WHERE dump_id = V_DUMP_ID
+FOR UPDATE;
+-- open the file for reading of text (up to v_amount characters per line)
+v_file := UTL_FILE.FOPEN(p_directory, p_file_name, 'r', v_amount);
+
+-- copy the data from the file into v_dest_clob one line at a time
+LOOP
+BEGIN
+-- read a line from the file into v_char_buffer;
+-- GET_LINE() does not copy the newline character into
+-- v_char_buffer
+UTL_FILE.GET_LINE(v_file, v_char_buffer);
+v_chars_read := LENGTH(v_char_buffer);
+-- append the line to v_dest_clob
+DBMS_LOB.WRITEAPPEND(v_dest_clob, v_chars_read, v_char_buffer);
+-- append a newline to v_dest_clob because v_char_buffer;
+-- the ASCII value for newline is 10, so CHR(10) returns newline
+DBMS_LOB.WRITEAPPEND(v_dest_clob, 1, CHR(10));
+
+EXCEPTION
+-- when there is no more data in the file then exit
+WHEN NO_DATA_FOUND THEN
+EXIT;
+END;
+END LOOP;
+commit;
+UPDATE QA_PAR_FILES_MAIN
+SET PARFILE=  v_dest_clob
+WHERE dump_id = V_DUMP_ID;
+commit;
+-- close the file
+UTL_FILE.FCLOSE(v_file);
+DBMS_OUTPUT.PUT_LINE('Copy successfully completed.');
+END qa_proccess_read;
+
+
+PROCEDURE qa_deploy_remote (V_DUMP_ID IN number) AS
+
+v_db_link varchar2(30);
+v_dir_name varchar2(1000);
+v_sql varchar2(4000);
+v_remote_host varchar2(200);
+v_status number (1);
+
+BEGIN
+
+SELECT A.DB_LINK,Q.status 
+  INTO   v_db_link,v_status
+  FROM QA_PAR_FILES_MAIN Q,ACTIVE_APP_LIST A
+ WHERE dump_id = V_DUMP_ID
+ AND Q.schema_name = A.DB_SCHEMA ;
+ 
+ IF v_status = 0 THEN
+ raise_application_error(-20101, 'This dump is disabled - status 0, deployment skiped');
+ END IF;
+ 
+ 
+ v_sql := 'delete QA_PAR_FILES_MAIN@'||v_db_link||'
+where dump_id = '||V_DUMP_ID||'';
+execute immediate (v_sql);
+--DBMS_OUTPUT.PUT_LINE(v_sql);
+v_sql :=  'insert into QA_PAR_FILES_MAIN@'||v_db_link||'
+(select DUMP_ID, CREATION_DATE, SCHEMA_NAME, DUMP_TYPES, STATUS, PARFILE from QA_PAR_FILES_MAIN where dump_id = '||V_DUMP_ID||')';
+--DBMS_OUTPUT.PUT_LINE(v_sql);
+execute immediate (v_sql);
+commit;
+ 
+v_sql := 'BEGIN exp_proccess_write@'||v_db_link||'(''SCRIPTS_DIR'','||V_DUMP_ID||'); END;';
+--DBMS_OUTPUT.PUT_LINE(v_sql);
+execute immediate (v_sql);
+
+END qa_deploy_remote;
+
+
+
+FUNCTION read_file_clob (V_FILE_NAME IN varchar2) return CLOB is
+
+p_directory VARCHAR2(100) default 'GSPROD_DIR';
+p_file_name VARCHAR2(1000);
+v_file UTL_FILE.FILE_TYPE;
+v_chars_read NUMBER;
+v_dest_clob CLOB;
+v_amount INTEGER := 32767;
+v_char_buffer VARCHAR2(32767);
+
+BEGIN
+
+-- open the file for reading of text (up to v_amount characters per line)
+v_file := UTL_FILE.FOPEN(p_directory, V_FILE_NAME, 'r', v_amount);
+dbms_lob.createtemporary(v_dest_clob,true);
+--v_dest_clob := empty_clob();
+
+-- copy the data from the file into v_dest_clob one line at a time
+LOOP
+BEGIN
+-- read a line from the file into v_char_buffer;
+-- GET_LINE() does not copy the newline character into
+-- v_char_buffer
+UTL_FILE.GET_LINE(v_file, v_char_buffer);
+v_chars_read := LENGTH(v_char_buffer);
+-- append the line to v_dest_clob
+DBMS_LOB.WRITEAPPEND(v_dest_clob, v_chars_read, v_char_buffer);
+-- append a newline to v_dest_clob because v_char_buffer;
+-- the ASCII value for newline is 10, so CHR(10) returns newline
+DBMS_LOB.WRITEAPPEND(v_dest_clob, 1, CHR(10));
+
+EXCEPTION
+-- when there is no more data in the file then exit
+WHEN NO_DATA_FOUND THEN
+EXIT;
+END;
+END LOOP;
+
+-- close the file
+UTL_FILE.FCLOSE(v_file);
+return v_dest_clob;
+dbms_lob.freetemporary(v_dest_clob);
+END read_file_clob;
+
+procedure qa_import_parfile IS
+
+v_error_code varchar2(1000);
+
+begin
+
+for i in (select new_template_name,PARFILE_name,Template_description from QA_PAR_FILES_IMPORT) LOOP
+
+        BEGIN
+        GS_PROD.QA_PAR_FILES_PKG.import_new_template(i.PARFILE_name,i.new_template_name,i.Template_description);
+        delete QA_PAR_FILES_IMPORT
+        where new_template_name = i.new_template_name;
+        commit;
+        
+        EXCEPTION 
+        WHEN OTHERS THEN
+        v_error_code := SQLERRM;
+        
+        update QA_PAR_FILES_IMPORT
+        set status = v_error_code
+        where new_template_name = i.new_template_name;
+        commit;
+        END;
+        
+End loop;
+
+end qa_import_parfile;
+
+
+procedure qa_import_parfile_to_dump IS
+
+v_error_code varchar2(1000);
+
+begin
+
+for i in (select rowid,Schema_name,PARFILE_name,dump_type from QA_PAR_FILES_IMPORT_TODUMP) LOOP
+
+        BEGIN
+        GS_PROD.QA_PAR_FILES_PKG.import_new_dump (i.PARFILE_name, i.Schema_name,i.dump_type);
+        delete QA_PAR_FILES_IMPORT_TODUMP
+        where rowid = i.rowid;
+        commit;
+        
+        EXCEPTION 
+        WHEN OTHERS THEN
+        v_error_code := SQLERRM;
+        
+        update QA_PAR_FILES_IMPORT_TODUMP
+        set status = v_error_code
+        where rowid = i.rowid;
+        commit;
+        END;
+        
+End loop;
+
+end qa_import_parfile_to_dump;
+
+
+
+END QA_PAR_FILES_PKG;
+/

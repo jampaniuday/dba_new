@@ -1,0 +1,18 @@
+CREATE OR REPLACE FORCE VIEW V_HR4_LAST_2_HOURS_BY_PARTIES AS
+SELECT
+    to_char(TRUNC (created_date,'HH24'),'HH24:MI') TIME,
+	(select name from fxcm_prod.a_organization@hr4_link where id=trading_party)	trading_party,
+	(select name from fxcm_prod.a_organization@hr4_link where id=counter_party)	counter_party,
+	(select name from fxcm_prod.a_organization@hr4_link where id=prime_broker)	prime_broker,
+    COUNT (*) NOES
+FROM V_HR4_TRADES
+WHERE created_date < TRUNC (SYSDATE, 'hh24')
+  AND created_date >= TRUNC (SYSDATE,'hh24')-1/24 
+GROUP BY
+    TRUNC (created_date,'HH24'),
+    trading_party,
+    counter_party,
+    prime_broker
+ORDER BY TRUNC (created_date,'HH24')
+;
+comment on table V_HR4_LAST_2_HOURS_BY_PARTIES is 'Harmony 4: This view sums tp/cp/bp trades per hour for the last complete hour beginning from the previous hour oclock. i.e. time now is 14:35, the view will return trades from 13:00 to 14:00';

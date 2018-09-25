@@ -1,0 +1,1 @@
+impdp system/manager DIRECTORY=DATA_PUMP_DIR DUMPFILE=expdp_HR_prod_200601311900.dmp  REMAP_SCHEMA=hr3_prod:prod_hr_3101 EXCLUDE=GRANT

@@ -1,0 +1,97 @@
+create or replace package Size_Collector as
+-- The package collects sizes of various segments.
+  
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'Size_Collector';
+  VERSION    CONSTANT VARCHAR2(30) := '1.0';
+  
+  procedure Run;
+
+  -- The procedure purges old data.
+  procedure Purge(P_Days_To_Keep in number);							  
+end Size_Collector;
+/
+
+
+create or replace package body Size_Collector as
+
+  v_errm          varchar2(200);
+
+  procedure Run is
+    C_APP_NAME      constant varchar2(90) := 'Size_Collector.Run';
+  begin
+    update SC_SEGMENTS_SIZES
+	set    IS_LAST_CAPTURE = 0
+	where  IS_LAST_CAPTURE = 1;
+  
+    insert into SC_SEGMENTS_SIZES(SCHEMA_NAME,
+                                  CAPTURE_TIME,
+                                  SEGMENT_NAME,
+                                  SEGMENT_TYPE,
+                                  TABLE_NAME,
+                                  SIZE_MB,
+                                  -- EST_NUM_OF_ROWS column is populated only for objects with statistics from last 24h and with 100% sampling.
+						          EST_NUM_OF_ROWS,
+								  IS_LAST_CAPTURE)
+	select DS.OWNER,
+	       SYSDATE,
+		   DS.SEGMENT_NAME,
+		   DS.SEGMENT_TYPE,
+		   Decode(RTrim(LTrim(SEGMENT_TYPE)), 'TABLE',      SEGMENT_NAME,
+		                                      'INDEX',      (select TABLE_NAME from DBA_INDEXES DI where DI.OWNER = DS.OWNER and DI.INDEX_NAME = DS.SEGMENT_NAME),
+								              'LOBSEGMENT', (select TABLE_NAME from DBA_LOBS DL    where DL.OWNER = DS.OWNER and DL.SEGMENT_NAME = DS.SEGMENT_NAME),
+								              'LOBINDEX',   (select TABLE_NAME from DBA_LOBS DL    where DL.OWNER = DS.OWNER and DL.INDEX_NAME = DS.SEGMENT_NAME)),
+		   Round(DS.BYTES/1024/1024),
+		   case when ((SYSDATE - DT.LAST_ANALYZED) < 1) and (DT.SAMPLE_SIZE = DT.NUM_ROWS)
+		        then DT.NUM_ROWS
+				else NULL
+				end,
+           1		   
+	from   DBA_SEGMENTS DS,
+	       DBA_TABLES   DT
+	where  DS.OWNER not in (select SCHEMA_NAME
+	                        from   SC_EXCLUDED_SCHEMAS)
+	  and  DS.SEGMENT_TYPE in ('TABLE', 'INDEX', 'LOBSEGMENT', 'LOBINDEX')
+	  and  DT.OWNER(+) = DS.OWNER 
+	  and  DT.TABLE_NAME(+) = DS.SEGMENT_NAME
+	  and not exists (select 1 
+	                  from   DBA_RECYCLEBIN DR
+					  where  DR.OBJECT_NAME = DS.SEGMENT_NAME
+					    and  DR.OWNER       = DS.OWNER);
+	  
+	  commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+	  rollback;
+  end Run; 
+  
+  procedure Purge (P_Days_To_Keep in number) is
+    C_APP_NAME      constant varchar2(90) := 'Size_Collector.Purge';
+  begin
+      delete SC_SEGMENTS_SIZES
+	  where  CAPTURE_TIME < SYSDATE - P_Days_To_Keep;
+	  
+	  commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+	  rollback;
+  end Purge;
+end Size_Collector;
+/
+
+BEGIN
+  delete VERSIONS
+  where  COMPONENT_NAME = Size_Collector.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values (Size_Collector.C_APP_NAME,
+			          Size_Collector.VERSION,
+					  SYSDATE);
+  commit;
+END;
+/

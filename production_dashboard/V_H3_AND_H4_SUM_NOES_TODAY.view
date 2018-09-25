@@ -1,0 +1,6 @@
+CREATE OR REPLACE VIEW V_H3_AND_H4_SUM_NOES_TODAY as
+select 
+ (select sum(noes) from V_HR4_TODAY_PER_HOUR)  H4_SUM_NOES,
+ (select sum(noes) from V_HR3_TODAY_PER_HOUR)  H3_SUM_NOES
+from dual ;
+

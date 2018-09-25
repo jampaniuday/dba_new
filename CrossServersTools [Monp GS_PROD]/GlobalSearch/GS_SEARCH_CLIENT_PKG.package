@@ -1,0 +1,61 @@
+CREATE OR REPLACE PACKAGE GS_SEARCH_CLIENT_PKG IS
+
+FUNCTION GET_RESULTS                       (P_SEARCH_UID      IN NUMBER) RETURN CLOB;
+
+FUNCTION EXECUTE_GS                        (P_TYPE_ID      IN NUMBER,
+                                            P_VALUE        IN VARCHAR2) RETURN NUMBER;
+
+END GS_SEARCH_CLIENT_PKG;
+/
+
+
+create or replace package body GS_SEARCH_CLIENT_PKG is
+
+
+-- Get all results for specfic Search unique identifer, and append them into one clob.
+FUNCTION GET_RESULTS                       (P_SEARCH_UID   IN NUMBER) RETURN CLOB IS P_LOB CLOB;
+
+                                            L_GS_SERVER_SCHEMA_NAME VARCHAR2(30) := 'itsik';
+                                            L_GS_TEMP_TABLE_NAME VARCHAR2(30) := 'gs_temp_table';
+                                            L_GS_DB_SERVER_DB_LINK VARCHAR2(30) := 'rddb25';
+                                            PRAGMA AUTONOMOUS_TRANSACTION;
+                                  
+BEGIN
+
+DELETE gs_temp_table;
+/*
+insert into itsik.gs_temp_table@rddb25 (SEARCH_UID,RESULT) values (P_SEARCH_UID,GS_SEARCH_SERVER_PKG.APPEND_LOBS@rddb25(P_SEARCH_UID));
+*/
+
+EXECUTE IMMEDIATE  'insert into '||L_GS_SERVER_SCHEMA_NAME||'.'||L_GS_TEMP_TABLE_NAME||'@'||L_GS_DB_SERVER_DB_LINK||' (SEARCH_UID,RESULT) values ('||P_SEARCH_UID||',GS_SEARCH_SERVER_PKG.APPEND_LOBS@'||L_GS_DB_SERVER_DB_LINK||'('||P_SEARCH_UID||'))';
+
+EXECUTE IMMEDIATE  'insert into '||L_GS_TEMP_TABLE_NAME||' (SEARCH_UID,RESULT) (SELECT SEARCH_UID,RESULT FROM '||L_GS_SERVER_SCHEMA_NAME||'.'||L_GS_TEMP_TABLE_NAME||'@'||L_GS_DB_SERVER_DB_LINK||' WHERE SEARCH_UID='||P_SEARCH_UID||')';
+
+SELECT RESULT
+INTO P_LOB
+FROM gs_temp_table
+WHERE SEARCH_UID=P_SEARCH_UID;
+
+-- DBMS_OUTPUT.PUT_LINE('this is it '||P_LOB);
+COMMIT;
+RETURN P_LOB;
+END GET_RESULTS;
+
+
+-- Execute golobal search, get type_id (from GS_SEARCH_TYPE table) and a search string, after execution get the search unique identifier.
+FUNCTION EXECUTE_GS                        (P_TYPE_ID      IN NUMBER,
+                                            P_VALUE        IN VARCHAR2) RETURN NUMBER IS P_SEARCH_UID NUMBER(30);
+                                            
+                                            
+                                            L_GS_DB_SERVER_DB_LINK VARCHAR2(30) := 'rddb25';
+
+BEGIN
+
+EXECUTE IMMEDIATE ('SELECT GS_SEARCH_SERVER_PKG.EXECUTE_TYPE@'||L_GS_DB_SERVER_DB_LINK||' ('||P_TYPE_ID||','''||P_VALUE||''') from dual') INTO P_SEARCH_UID;
+                       
+RETURN P_SEARCH_UID; 
+                                        
+END EXECUTE_GS;
+
+end GS_SEARCH_CLIENT_PKG;
+/

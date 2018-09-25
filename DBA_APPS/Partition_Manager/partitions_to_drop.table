@@ -1,0 +1,17 @@
+create table partitions_to_drop
+(
+  INSERT_TIME     DATE not null,
+  TABLE_NAME      VARCHAR2(30 BYTE) not null,
+  PARTITION_NAME  VARCHAR2(30 BYTE) not null,
+  insert_by             VARCHAR2(30 BYTE) not null
+);
+	
+CREATE UNIQUE INDEX p2d_TABLE_PARTITION_UK ON partitions_to_drop(TABLE_NAME, PARTITION_NAME);
+
+grant insert, update, delete on partitions_to_drop to DBA_APPS;
+
+grant select on partitions_to_drop to public;
+
+grant select on partitions_to_drop to dba_apps with grant option;
+
+

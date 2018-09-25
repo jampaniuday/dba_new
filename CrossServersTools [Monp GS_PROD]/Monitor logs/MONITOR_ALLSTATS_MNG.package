@@ -1,0 +1,717 @@
+CREATE OR REPLACE PACKAGE MONITOR_ALLSTATS_MNG AS
+
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'MONITOR_ALLSTATS_MNG';
+  VERSION       CONSTANT VARCHAR2(30) := '1.1';
+  
+  PROCEDURE MONITOR_GATHER_STATS (L_SCHEMA_TYPE IN VARCHAR2  default 'PROD', L_SECS_THRESHOLD IN NUMBER default 120);
+  
+  PROCEDURE MONITOR_GATHER_AVG_STATS (L_SCHEMA_TYPE IN VARCHAR2  default 'PROD');
+  
+  PROCEDURE MONITOR_SINGLE_DATA (SEARCH_ID IN NUMBER);
+  
+  PROCEDURE MONITOR_CLEAR_DEL_RESULTS;
+  
+  PROCEDURE MONITOR_CLEAR_HIST_RESULTS;
+  
+  PROCEDURE MONITOR_AVG_DATA (SEARCH_ID IN NUMBER);
+  
+  PROCEDURE MONITOR_HANDLE_ALERTS;
+  
+  PROCEDURE MONITOR_INVESTIGATE (invet_id IN NUMBER);
+  
+  FUNCTION MONITOR_GET_MAX_DATE (v_executing_prodecure IN VARCHAR2) RETURN timestamp;
+
+END MONITOR_ALLSTATS_MNG;
+/
+
+CREATE OR REPLACE PACKAGE BODY MONITOR_ALLSTATS_MNG AS
+
+PROCEDURE MONITOR_CLEAR_DEL_RESULTS 
+IS
+
+BEGIN
+delete MONITOR_RESULTS_TABLE;
+commit;
+
+END MONITOR_CLEAR_DEL_RESULTS;
+
+PROCEDURE MONITOR_CLEAR_HIST_RESULTS 
+IS
+
+BEGIN
+delete MONITOR_RESULTS_TABLE_HIST;
+commit;
+
+END MONITOR_CLEAR_HIST_RESULTS;
+
+PROCEDURE MONITOR_INVESTIGATE (invet_id IN NUMBER)
+IS
+v_loop_counter NUMBER DEFAULT 1;
+BEGIN
+
+
+FOR i IN (SELECT EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, SAMPLE_DATE, AVG_TIME_MS, AVG_SPEED
+          FROM GS_PROD.MONITOR_AVERAGED_DATA WHERE ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE)=invet_id ORDER BY SAMPLE_DATE DESC) LOOP
+          
+          IF v_loop_counter = 1 THEN
+          
+          DBMS_OUTPUT.PUT_LINE('Object information   *******************************************************************');
+          DBMS_OUTPUT.PUT_LINE('Procedure:'||i.EXECUTING_PRODECURE||' Schema:'||i.OWNER||' Object:'||i.OBJECT_NAME||' Type:'||i.OBJECT_TYPE);
+          DBMS_OUTPUT.PUT_LINE('*****************************************************************************************');
+          DBMS_OUTPUT.PUT_LINE('Monthly Avrage   ************************************************************************');
+          END IF;
+          
+          DBMS_OUTPUT.PUT_LINE('Sampled:'||i.SAMPLE_DATE||' Monthly time on avg(ms):'||i.AVG_TIME_MS||' Monthly avg speed(mb/min):'||i.AVG_SPEED);
+          
+          v_loop_counter := v_loop_counter+1;
+
+END LOOP;
+
+          DBMS_OUTPUT.PUT_LINE('*****************************************************************************************');
+          DBMS_OUTPUT.PUT_LINE('Single runs stats ***********************************************************************');
+          
+FOR i IN (SELECT RUN_ID, EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, FIELDS_NUMBER, 
+          INDEXES_NUMBER, END_STATUS, FAILED_STATUS, SPEED
+          FROM MONITOR_GATHER_ALLSTATS_LOG WHERE ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME)=invet_id ORDER BY BEGIN_TIME_STAMP DESC) LOOP
+           
+          IF v_loop_counter = 1 THEN
+          
+          DBMS_OUTPUT.PUT_LINE('Procedure:'||i.EXECUTING_PRODECURE||' Schema:'||i.OWNER||' Object:'||i.OBJECT_NAME||' Type:'||i.OBJECT_TYPE);
+                  
+          END IF;
+          
+              IF SUBSTR(i.EXECUTING_PRODECURE,0,1)='G' THEN
+          
+              DBMS_OUTPUT.PUT_LINE('Runtime started:'||i.BEGIN_TIME_STAMP||' Total runtime(ms): '||i.TOTAL_TIME_MS||' Total runtime(min): '||trunc(i.TOTAL_TIME_MS/60000,2)||' Speed in mb/min:'||i.SPEED||' Object_size(mb):'||i.SIZE_MB||' Number of columns:'||i.FIELDS_NUMBER);
+              
+              ELSE 
+              
+              DBMS_OUTPUT.PUT_LINE('Runtime started:'||i.BEGIN_TIME_STAMP||' Total runtime(ms): '||i.TOTAL_TIME_MS||' Total runtime(min): '||trunc(i.TOTAL_TIME_MS/60000,2)||' Speed in mb/min:'||i.SPEED);
+          
+              END IF;
+          
+          v_loop_counter := v_loop_counter+1;
+END LOOP;
+
+
+END MONITOR_INVESTIGATE;
+
+PROCEDURE MONITOR_HANDLE_ALERTS
+IS
+BEGIN
+
+
+FOR I IN (SELECT ID FROM MONITOR_THRESHOLD_RULES WHERE ACTIVE_STATUS = 1 AND MONTH_CONSECUTIVE_TO_CHECK IS NULL) LOOP
+
+MONITOR_SINGLE_DATA(I.ID);
+
+END LOOP;
+
+FOR I IN (SELECT ID FROM MONITOR_THRESHOLD_RULES WHERE ACTIVE_STATUS = 1 AND single_consecutive_to_check IS NULL) LOOP
+
+MONITOR_AVG_DATA(I.ID);
+
+END LOOP;
+
+END MONITOR_HANDLE_ALERTS;
+
+
+PROCEDURE MONITOR_AVG_DATA (SEARCH_ID IN NUMBER)
+IS
+v_check NUMBER;
+v_pct_increase NUMBER;
+v_effected_procedure MONITOR_THRESHOLD_RULES.EFFECTED_PROCEDURE%TYPE;
+v_metric_type MONITOR_THRESHOLD_RULES.METRIC_TYPE%TYPE;
+v_alert_level MONITOR_THRESHOLD_RULES.ALERT_LEVEL%TYPE;
+v_publish_alert MONITOR_THRESHOLD_RULES.PUBLISH_ALERT%TYPE;
+v_monthly_consecutive_to_check MONITOR_THRESHOLD_RULES.MONTH_CONSECUTIVE_TO_CHECK%TYPE;
+v_monthly_alert_precentage MONITOR_THRESHOLD_RULES.MONTHLY_ALERT_PRECENTAGE%TYPE;
+v_monthly_threshold_alert_days MONITOR_THRESHOLD_RULES.MONTHLY_THRESHOLD_ALERT_DAYS%TYPE;
+v_monthly_threshold_alert MONITOR_THRESHOLD_RULES.MONTHLY_THRESHOLD_ALERT%TYPE;
+v_system_type MONITOR_THRESHOLD_RULES.SYSTEM_TYPE%TYPE;
+
+BEGIN
+
+-- verfiy the search id validty.
+SELECT COUNT(1)
+INTO v_check
+FROM MONITOR_THRESHOLD_RULES
+WHERE ID = SEARCH_ID
+AND ACTIVE_STATUS = 1;
+
+IF v_check = 0 THEN 
+Raise_Application_Error (-20343, 'The search ID is not valid or is inactive.');
+END IF;
+
+-- Gather Thresholds parameters 
+SELECT EFFECTED_PROCEDURE, SYSTEM_TYPE,METRIC_TYPE, ALERT_LEVEL, MONTH_CONSECUTIVE_TO_CHECK, MONTHLY_ALERT_PRECENTAGE, MONTHLY_THRESHOLD_ALERT_DAYS, MONTHLY_THRESHOLD_ALERT,PUBLISH_ALERT
+INTO v_effected_procedure,v_system_type,v_metric_type,v_alert_level,v_monthly_consecutive_to_check,v_monthly_alert_precentage,v_monthly_threshold_alert_days,v_monthly_threshold_alert,v_publish_alert
+FROM MONITOR_THRESHOLD_RULES
+WHERE ACTIVE_STATUS = 1
+AND ID = SEARCH_ID;
+
+v_pct_increase := v_monthly_alert_precentage;
+
+IF v_metric_type = 'TIME' THEN
+
+    INSERT INTO MONITOR_RESULTS_TABLE (EXECUTING_PRODECURE,SAMPLE_TYPE, OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT)
+    WITH MAINTOP AS (
+    SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,RT,count(RT) over (partition BY RT) as counter
+    FROM (
+     SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,SUM(rank_check) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,AVG_TIME_MS) RT
+     FROM 
+    (SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,case when ranked - lag(ranked) over (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,AVG_TIME_MS ASC) = 1 THEN 0 ELSE 1 END as rank_check
+    FROM     (SELECT EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, AVG_TIME_MS, SAMPLE_DATE,  AVG_SPEED,       
+       LEAD(AVG_TIME_MS,1,0) OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE DESC) before_avg_time_ms,
+       LEAD(AVG_SPEED,1,0) OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE DESC) before_avg_speed,
+       ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE) hashing,
+       RANK() OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE ASC) ranked
+       FROM MONITOR_AVERAGED_DATA
+       WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+       AND OWNER LIKE '%'||v_system_type||'%'
+    ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,SAMPLE_DATE DESC) MAIN
+       WHERE before_avg_time_ms*v_pct_increase/100 < AVG_TIME_MS
+       AND SAMPLE_DATE > SYSDATE - v_monthly_threshold_alert_days
+       AND AVG_TIME_MS > v_monthly_threshold_alert) MAINRT ) MAINRTCOUNT )
+       SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,v_publish_alert
+         from MAINTOP
+         where counter >= v_monthly_consecutive_to_check
+       MINUS
+       SELECT EXECUTING_PRODECURE,'AVG', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+       FROM MONITOR_RESULTS_TABLE    
+       WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+       AND OWNER LIKE '%'||v_system_type||'%'
+       MINUS
+       SELECT EXECUTING_PRODECURE,'AVG', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+       FROM MONITOR_RESULTS_TABLE_HIST  
+       WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+       AND OWNER LIKE '%'||v_system_type||'%';
+
+ELSE
+
+    INSERT INTO MONITOR_RESULTS_TABLE (EXECUTING_PRODECURE,SAMPLE_TYPE, OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT)
+    WITH MAINTOP AS (
+    SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,RT,count(RT) over (partition BY RT) as counter
+    FROM (
+     SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,SUM(rank_check) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,AVG_TIME_MS) RT
+     FROM 
+        (  SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,case when ranked - lag(ranked) over (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,AVG_TIME_MS ASC) = 1 THEN 0 ELSE 1 END as rank_check
+        FROM     (SELECT EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, AVG_TIME_MS, SAMPLE_DATE,  AVG_SPEED,     
+           LEAD(AVG_TIME_MS,1,0) OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE DESC) before_avg_time_ms,  
+           LEAD(AVG_SPEED,1,0) OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE DESC) before_avg_speed,
+           ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE) hashing,
+           RANK() OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE ASC) ranked
+           FROM MONITOR_AVERAGED_DATA
+           WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+           AND OWNER LIKE '%'||v_system_type||'%'
+        ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,SAMPLE_DATE DESC) MAIN
+           WHERE before_avg_speed > AVG_SPEED*v_pct_increase/100
+           AND SAMPLE_DATE > SYSDATE - v_monthly_threshold_alert_days
+           AND AVG_SPEED < v_monthly_threshold_alert) MAINRT ) MAINRTCOUNT )
+           SELECT EXECUTING_PRODECURE,'AVG',OWNER,OBJECT_NAME,OBJECT_TYPE,SAMPLE_DATE,AVG_SPEED,before_avg_speed,AVG_TIME_MS,before_avg_time_ms,SEARCH_ID,v_alert_level,v_metric_type,hashing,v_publish_alert
+             from MAINTOP
+             where counter >= v_monthly_consecutive_to_check
+       MINUS
+       SELECT EXECUTING_PRODECURE,'AVG', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+       FROM MONITOR_RESULTS_TABLE    
+       WHERE SUBSTR(v_effected_procedure,0,1) = SUBSTR(EXECUTING_PRODECURE,0,1)
+       AND OWNER LIKE '%'||v_system_type||'%'
+       MINUS
+       SELECT EXECUTING_PRODECURE,'AVG', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+       FROM MONITOR_RESULTS_TABLE_HIST 
+       WHERE SUBSTR(v_effected_procedure,0,1) = SUBSTR(EXECUTING_PRODECURE,0,1)
+       AND OWNER LIKE '%'||v_system_type||'%';
+                        
+END IF;
+
+COMMIT;
+END MONITOR_AVG_DATA;
+
+-- This procedure aggragte data from the monitor_gather_allstats_log into monthly avg.
+PROCEDURE MONITOR_GATHER_AVG_STATS (L_SCHEMA_TYPE IN VARCHAR2  default 'PROD')
+IS 
+
+v_end_date date;
+v_start_date date;
+v_last_sample_date date;
+
+begin
+
+select trunc(sysdate,'MM') ,trunc(trunc(sysdate,'MM')-2,'MM')
+into v_end_date,v_start_date
+from dual;
+
+-- dbms_output.put_line(v_end_date||v_start_date);
+
+FOR I IN (select distinct(EXECUTING_PRODECURE) as exec_proc from MONITOR_GATHER_ALLSTATS_LOG where owner like '%'||L_SCHEMA_TYPE||'%') LOOP
+
+select max(sample_date)
+into v_last_sample_date
+from MONITOR_AVERAGED_DATA
+where EXECUTING_PRODECURE = i.exec_proc
+and owner like '%'||L_SCHEMA_TYPE||'%';
+
+IF v_last_sample_date is null THEN
+v_start_date := sysdate -365;
+END IF;
+
+IF v_last_sample_date < v_start_date or v_last_sample_date is null   THEN
+
+insert into MONITOR_AVERAGED_DATA (EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, SAMPLE_DATE,AVG_TIME_MS, AVG_SPEED) 
+select EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE,to_date(to_char(begin_time_stamp,'mm/yyyy'),'mm/yyyy'),round(avg(TOTAL_TIME_MS)),round(avg(speed)) 
+from MONITOR_GATHER_ALLSTATS_LOG 
+where EXECUTING_PRODECURE =i.exec_proc and begin_time_stamp >= v_start_date and END_TIME_STAMP < v_end_date 
+and owner like '%'||L_SCHEMA_TYPE||'%'
+group by to_date(to_char(begin_time_stamp,'mm/yyyy'),'mm/yyyy'),EXECUTING_PRODECURE,OWNER, OBJECT_NAME,OBJECT_TYPE;
+
+commit;
+
+END IF;
+
+END LOOP;
+
+end MONITOR_GATHER_AVG_STATS;
+
+
+-- Get the timestamp for the latest sample taken. 
+FUNCTION MONITOR_GET_MAX_DATE (v_executing_prodecure IN VARCHAR2) RETURN timestamp
+IS 
+l_max_time TIMESTAMP;
+
+BEGIN
+     SELECT MAX (end_time_stamp)
+     INTO l_max_time
+     FROM monitor_gather_allstats_log
+     WHERE SUBSTR(v_executing_prodecure,0,1) = SUBSTR(EXECUTING_PRODECURE,0,1);
+     
+        IF l_max_time IS NULL
+   THEN
+      l_max_time := SYSTIMESTAMP - 100;
+   END IF;
+     
+RETURN l_max_time;
+
+END MONITOR_GET_MAX_DATE;
+
+
+-- This proeducre collects data from dba_apps.GATHER_STATS_LOG all over the databases in Traiana (PROD or UAT) 
+PROCEDURE MONITOR_GATHER_STATS (L_SCHEMA_TYPE IN VARCHAR2  default 'PROD', L_SECS_THRESHOLD IN NUMBER default 120)
+IS
+   l_sql_stmt   VARCHAR2 (4000);
+   l_sql_stmt1 VARCHAR2(4000);
+   l_sql_stmt2 VARCHAR2(4000);
+   l_check_counter number;
+   l_check_counter1 number;
+   l_max_time_gather   TIMESTAMP;
+   l_max_time_data      TIMESTAMP;
+   l_max_time_partitions      TIMESTAMP;
+   l_max_time_neptune      TIMESTAMP;
+   L_SQLERRM    VARCHAR2 (1000);
+   L_SQLCODE    VARCHAR2 (30);
+   V_SECS_THRESHOLD number default null;
+   
+BEGIN
+
+    -- set the Minimum threshold in seconds, when gathering information from logs only log entries where the TIME parameter is over this threshold will be gathered.
+    select value
+    into V_SECS_THRESHOLD
+    from MONITOR_PARAMETERS
+    where parameter_name = 'SECS_THRESHOLD';
+    
+    IF V_SECS_THRESHOLD is null THEN
+        V_SECS_THRESHOLD := L_SECS_THRESHOLD; 
+    END IF;
+
+-- Get  the date of the last information gathered (next gathering begining time) - Gather_statistics.
+select MONITOR_GET_MAX_DATE('Gather') into l_max_time_gather from dual;
+     
+-- Get  the date of the last information gathered (next gathering begining time) - Data_manager.
+select MONITOR_GET_MAX_DATE('Data') into l_max_time_data from dual;
+
+-- Get  the date of the last information gathered (next gathering begining time) - Partition_manager.
+select MONITOR_GET_MAX_DATE('Partition') into l_max_time_partitions from dual;
+
+-- Get  the date of the last information gathered (next gathering begining time) - Partition_manager.
+select MONITOR_GET_MAX_DATE('NEPTUNE') into l_max_time_neptune from dual;
+
+
+-- Collect Stats from neptube log
+        BEGIN
+        IF l_max_time_neptune is null THEN
+        l_max_time_neptune := systimestamp -200;
+        END IF;
+        
+        Insert into MONITOR_GATHER_ALLSTATS_LOG (
+        RUN_ID, EXECUTING_PRODECURE, OWNER, 
+                       OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, 
+                       BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, 
+                       FIELDS_NUMBER, INDEXES_NUMBER, END_STATUS, 
+                       FAILED_STATUS, SPEED,HASHING) 
+        SELECT ID "RUN_ID",
+               'NEPTUNE' AS EXECUTING_PRODECURE,
+               SCHEMA_NAME AS OWNER,
+               SUBSTR (view_name, 6) AS OBJECT_NAME,
+               'TABLE' OBJECT_TYPE,
+               TOTAL_TIME_MS,
+               FINISH_TIME - INTERVAL '1' SECOND * (TOTAL_TIME_MS / 1000) BEGIN_TIME_STAMP,
+               FINISH_TIME END_TIME_STAMP,
+               NULL SIZE_MB,
+               NULL FIELDS_NUMBER,
+               NULL INDEXES_NUMBER,
+               NULL END_STATUS,
+               NULL FAILED_STATUS,
+               CASE WHEN ROWS_PER_MINUTE = 'N/A' THEN '0' ELSE ROWS_PER_MINUTE END
+                  AS SPEED,
+               ORA_HASH ('NEPTUNE' || SCHEMA_NAME || SUBSTR (view_name, 6) || 'TABLE') hashing
+          FROM neptune_log@neptune
+          WHERE FINISH_TIME > l_max_time_neptune
+          AND SCHEMA_NAME like '%'||L_SCHEMA_TYPE||'%'
+               AND total_time_ms > V_SECS_THRESHOLD*1000;
+          commit;
+          
+                EXCEPTION
+                 WHEN OTHERS
+                 THEN
+                 ROLLBACK;
+                 L_SQLCODE := SQLCODE;
+                       INSERT INTO MONITOR_GATHER_ALL_DISCARDS (EXECUTING_PRODECURE, OWNER, DB_LINK, ERRM_MSG, SQL_CODE,Discard_date) 
+                                                                                         VALUES ('NEPTUNE', 'NEPTUNE','NEPTUNE',L_SQLERRM,L_SQLCODE,sysdate);
+                       COMMIT;
+          
+          END;
+  
+  
+   FOR i IN (SELECT db_link, username
+               FROM user_db_links
+              WHERE db_link  LIKE '%'||L_SCHEMA_TYPE||'%')
+              
+   LOOP
+   -- Gather stats
+      l_sql_stmt :=
+            'insert into monitor_gather_allstats_log (
+               RUN_ID, EXECUTING_PRODECURE, OWNER, 
+               OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, 
+               BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, 
+               FIELDS_NUMBER, INDEXES_NUMBER, END_STATUS, 
+               FAILED_STATUS, SPEED,HASHING) 
+            select RUN_ID, EXECUTING_PRODECURE, OWNER, 
+               OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, 
+               BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, 
+               FIELDS_NUMBER, INDEXES_NUMBER, END_STATUS,
+               FAILED_STATUS,round( TOTAL_TIME_MS/case SIZE_MB when 0 then 0.1 else SIZE_MB end,0),(ORA_HASH(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE))
+               from '|| i.username|| '.GATHER_STATS_LOG@' || i.DB_LINK|| ' 
+               where OWNER like ''%'||L_SCHEMA_TYPE||'%''
+               and (total_time_ms > ' || V_SECS_THRESHOLD|| '*1000 and end_status !=''FINISHED'' and END_TIME_STAMP > '''|| l_max_time_gather|| ''') or (end_status =''FAILED'' and END_TIME_STAMP >'''|| l_max_time_gather|| ''')';
+
+   -- Data Manager
+      l_sql_stmt1 := 
+      'insert into monitor_gather_allstats_log (
+               RUN_ID, EXECUTING_PRODECURE, OWNER, 
+               OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, 
+               BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, 
+               FIELDS_NUMBER, INDEXES_NUMBER, END_STATUS, 
+               FAILED_STATUS, SPEED,HASHING) 
+              select ID,''Data_Manager_''||COMPONENT,SCHEMA_NAME,SRC_TABLE_NAME,''TABLE'',round(avg(TOTAL_TIME_MS)),
+              min(OPERATION_TIME),  max(OPERATION_TIME),NULL,NULL,NULL,''DONE'',NULL,round(avg(ROWS_PER_MINUTE)),(ORA_HASH(''Data_Manager_''||COMPONENT||SCHEMA_NAME||SRC_TABLE_NAME||''TABLE''))
+             from '|| i.username|| '.DATA_MANAGER_LOG@' || i.DB_LINK|| ' 
+             where schema_name like ''%'||L_SCHEMA_TYPE||'%''
+            AND operation like ''TOTAL BUCKET%''
+             HAVING (round(avg(TOTAL_TIME_MS)) > ' || V_SECS_THRESHOLD|| '*1000 and min(OPERATION_TIME) > '''|| l_max_time_data|| ''')
+             group by ID,SCHEMA_NAME,SRC_TABLE_NAME,COMPONENT';
+             
+   -- Partition Manager
+      l_sql_stmt2 :=  
+                         'insert into monitor_gather_allstats_log (
+               RUN_ID, EXECUTING_PRODECURE, OWNER, 
+               OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, 
+               BEGIN_TIME_STAMP, END_TIME_STAMP, SIZE_MB, 
+               FIELDS_NUMBER, INDEXES_NUMBER, END_STATUS, 
+               FAILED_STATUS, SPEED,HASHING) 
+                select id run_id, 
+                         ''Partition_Manager_''||component  EXECUTING_PRODECURE, 
+                         schema_name owner, 
+                         table_name object_name,
+                         ''TABLE'' object_type,
+                         total_time_ms,
+                         operation_time BEGIN_TIME_STAMP,
+                         operation_time + interval ''1'' second*(total_time_ms/1000) END_TIME_STAMP,
+                         null SIZE_MB,
+                         null FIELDS_NUMBER,
+                         case when component = ''rebuild_unusable_indexes'' then substr(return_message, 1, instr(return_message,'' '')-1) else null end INDEXES_NUMBER,
+                         null END_STATUS,
+                         null FAILED_STATUS,
+                         null SPEED,
+                         (ORA_HASH(''Partition_Manager_''||component||schema_name||table_name||''TABLE''))
+                from '|| i.username|| '.partition_manager_log@' || i.DB_LINK|| ' 
+                where schema_name like ''%'||L_SCHEMA_TYPE||'%''
+                and id != 0
+                and (total_time_ms > ' || V_SECS_THRESHOLD|| '*1000 and  (operation_time + interval ''1'' second*(total_time_ms/1000)) > '''|| l_max_time_partitions|| ''')
+                and ( (component = ''rebuild_unusable_indexes'' and return_message like  ''% indexes rebuilt. '' and substr(return_message, 1, 1) <> 0)or
+                        (component = ''ALLOCATE_PARTITIONS_FOR_SCHEMA'' and return_message = ''Allocate partitions finished successfully. '') or
+                        (component = ''DROP_PARTITIONS_FOR_SCHEMA'' and return_message like ''Drop partitions finished successfully. % partitions dropped. '') )';
+                        
+                        
+
+
+      BEGIN
+         -- DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+         EXECUTE IMMEDIATE l_sql_stmt;
+         -- clear MONITOR_GATHER_ALL_DISCARDS records after success run.
+         delete MONITOR_GATHER_ALL_DISCARDS
+         where EXECUTING_PRODECURE = 'Gather_Statistics'
+         and owner = i.username 
+         and db_link =  i.DB_LINK;
+         
+         COMMIT;
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            IF SQLCODE = -942
+            THEN
+               L_SQLERRM := 'Target DB is missing GATHER_STATS_LOG table';
+            ELSE
+               L_SQLERRM := SQLERRM;
+            END IF;
+            
+            L_SQLCODE := SQLCODE;
+            
+            select count(1) 
+            into l_check_counter
+            from MONITOR_GATHER_ALL_DISCARDS
+            where EXECUTING_PRODECURE = 'Gather_Statistics'
+            and owner = i.username 
+            and db_link =  i.DB_LINK
+            and SQL_CODE = L_SQLCODE;
+            
+            IF l_check_counter = 0 THEN 
+            --DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+            l_sql_stmt :='INSERT INTO MONITOR_GATHER_ALL_DISCARDS (
+                               EXECUTING_PRODECURE, OWNER, DB_LINK, 
+                               ERRM_MSG, SQL_CODE,Discard_date) 
+                               select ''Gather_Statistics'','''|| i.username||''','''||i.DB_LINK||''','''||L_SQLERRM||''','''||SQLCODE||''',sysdate from dual';
+
+            --DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+            --DBMS_OUTPUT.PUT_LINE(l_sql_stmt2);
+            EXECUTE IMMEDIATE l_sql_stmt;
+            commit;
+            END IF;
+      END;
+      
+        BEGIN
+         -- DBMS_OUTPUT.PUT_LINE(l_sql_stmt1);
+         EXECUTE IMMEDIATE l_sql_stmt1;
+         -- clear MONITOR_GATHER_ALL_DISCARDS records after success run.
+         delete MONITOR_GATHER_ALL_DISCARDS
+         where EXECUTING_PRODECURE = 'Data_Manager'
+         and owner = i.username 
+         and db_link =  i.DB_LINK;
+         
+         COMMIT;
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            IF SQLCODE = -942
+            THEN
+               L_SQLERRM := 'Target DB is missing DATA_MANAGER_LOG table';
+            ELSE
+               L_SQLERRM := SQLERRM;
+            END IF;
+            
+             L_SQLCODE := SQLCODE;
+
+            select count(1) 
+            into l_check_counter
+            from MONITOR_GATHER_ALL_DISCARDS
+            where EXECUTING_PRODECURE = 'Data_Manager'
+            and owner = i.username 
+            and db_link =  i.DB_LINK
+            and SQL_CODE = L_SQLCODE;
+            
+            IF l_check_counter = 0 THEN 
+            l_sql_stmt :='INSERT INTO GS_PROD.MONITOR_GATHER_ALL_DISCARDS (
+                               EXECUTING_PRODECURE, OWNER, DB_LINK, 
+                               ERRM_MSG, SQL_CODE,Discard_date) 
+                               select ''Data_Manager'','''|| i.username||''','''||i.DB_LINK||''','''||L_SQLERRM||''','''||SQLCODE||''',sysdate from dual';
+
+            --DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+            EXECUTE IMMEDIATE l_sql_stmt;
+            commit;
+            end if;
+      END;
+      
+         BEGIN
+         -- DBMS_OUTPUT.PUT_LINE(l_sql_stmt2);
+         EXECUTE IMMEDIATE l_sql_stmt2;
+         -- clear MONITOR_GATHER_ALL_DISCARDS records after success run.
+         delete MONITOR_GATHER_ALL_DISCARDS
+         where EXECUTING_PRODECURE = 'Partition_Manager'
+         and owner = i.username 
+         and db_link =  i.DB_LINK;
+         
+         COMMIT;
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+         
+         -- checking if Enterprise edition 
+         l_sql_stmt := 'select count(1) 
+         from v$version@'|| i.DB_LINK||'
+         where rownum<2 
+         and banner like ''%Enterprise%''';
+         
+         EXECUTE IMMEDIATE l_sql_stmt into l_check_counter1;     
+         
+         L_SQLCODE := SQLCODE;   
+         
+            IF l_check_counter1 = 0
+            THEN
+               L_SQLERRM  := 'Target DB is missing PARTITION_MANAGER_LOG table';
+            ELSIF SQLCODE = -942
+            THEN
+               L_SQLERRM  := 'Traget DB is Standart Edition - Partitions feature doesnt exists';    
+               L_SQLCODE  :=000;         
+            ELSE
+               L_SQLERRM := SQLERRM;
+            END IF;
+            
+            -- check if partition_manager feature is installed.
+            select count(1) 
+            into l_check_counter
+            from MONITOR_GATHER_ALL_DISCARDS
+            where EXECUTING_PRODECURE = 'Partition_Manager'
+            and owner = i.username 
+            and db_link =  i.DB_LINK
+            and SQL_CODE = L_SQLCODE;
+            
+            IF l_check_counter = 0 THEN 
+            l_sql_stmt :='INSERT INTO GS_PROD.MONITOR_GATHER_ALL_DISCARDS (
+                               EXECUTING_PRODECURE, OWNER, DB_LINK, 
+                               ERRM_MSG, SQL_CODE,Discard_date) 
+                               select ''Partition_Manager'','''|| i.username||''','''||i.DB_LINK||''','''||L_SQLERRM||''','''||L_SQLCODE||''',sysdate from dual';
+
+            --DBMS_OUTPUT.PUT_LINE(l_sql_stmt);
+            EXECUTE IMMEDIATE l_sql_stmt;
+            commit;
+            end if;
+      END;
+   END LOOP;
+END MONITOR_GATHER_STATS;
+
+PROCEDURE MONITOR_SINGLE_DATA (SEARCH_ID IN NUMBER)
+IS
+v_check NUMBER;
+v_pct NUMBER;
+v_effected_procedure MONITOR_THRESHOLD_RULES.EFFECTED_PROCEDURE%TYPE;
+v_metric_type MONITOR_THRESHOLD_RULES.METRIC_TYPE%TYPE;
+v_alert_level MONITOR_THRESHOLD_RULES.ALERT_LEVEL%TYPE;
+v_publish_alert MONITOR_THRESHOLD_RULES.PUBLISH_ALERT%TYPE;
+v_single_consecutive_to_check MONITOR_THRESHOLD_RULES.SINGLE_CONSECUTIVE_TO_CHECK%TYPE;
+v_single_alert_precentage MONITOR_THRESHOLD_RULES.SINGLE_ALERT_PRECENTAGE%TYPE;
+v_single_threshold_alert_days MONITOR_THRESHOLD_RULES.SINGLE_THRESHOLD_ALERT_DAYS%TYPE;
+v_single_threshold_alert MONITOR_THRESHOLD_RULES.SINGLE_THRESHOLD_ALERT%TYPE;
+v_system_type MONITOR_THRESHOLD_RULES.SYSTEM_TYPE%TYPE;
+
+BEGIN
+
+-- verfiy the search id validty.
+SELECT COUNT(1)
+INTO v_check
+FROM MONITOR_THRESHOLD_RULES
+WHERE ID = SEARCH_ID
+AND ACTIVE_STATUS = 1;
+
+IF v_check = 0 THEN 
+Raise_Application_Error (-20343, 'The search ID is not valid or is inactive.');
+END IF;
+
+-- Gather Thresholds parameters 
+SELECT EFFECTED_PROCEDURE, SYSTEM_TYPE,METRIC_TYPE, ALERT_LEVEL, SINGLE_CONSECUTIVE_TO_CHECK, SINGLE_ALERT_PRECENTAGE, SINGLE_THRESHOLD_ALERT_DAYS, SINGLE_THRESHOLD_ALERT,PUBLISH_ALERT
+INTO v_effected_procedure,v_system_type,v_metric_type,v_alert_level,v_single_consecutive_to_check,v_single_alert_precentage,v_single_threshold_alert_days,v_single_threshold_alert,v_publish_alert
+FROM MONITOR_THRESHOLD_RULES
+WHERE ACTIVE_STATUS = 1
+AND ID = SEARCH_ID;
+
+    v_pct := v_single_alert_precentage;
+    
+        IF v_metric_type = 'SPEED' THEN
+
+        INSERT INTO MONITOR_RESULTS_TABLE (EXECUTING_PRODECURE,SAMPLE_TYPE, OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT)
+        WITH MAINTOP AS (
+        SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,rank_check,ranked,RT,count(RT) over (partition BY RT) as counter
+        FROM (
+         SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,rank_check,ranked,SUM(rank_check) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP) RT
+         FROM
+           ( SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,case when ranked - lag(ranked) over (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP ASC) = 1 THEN 0 ELSE 1 END as rank_check  
+            FROM     (SELECT EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, BEGIN_TIME_STAMP, END_TIME_STAMP, END_STATUS, SPEED,
+               LEAD(SPEED,1,0) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP DESC) before_speed,
+               LEAD(TOTAL_TIME_MS,1,0) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP DESC) before_total_time_ms,
+               ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE) hashing,
+               RANK() OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP ASC) ranked
+               FROM MONITOR_GATHER_ALLSTATS_LOG
+               WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+               AND OWNER LIKE '%'||v_system_type||'%'
+               AND (END_STATUS ='DONE' OR END_STATUS IS NULL)) MAIN 
+            WHERE speed*v_pct/100 < before_speed
+               AND BEGIN_TIME_STAMP > SYSDATE - v_single_threshold_alert_days
+               AND SPEED < v_single_threshold_alert
+               ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP ASC) MAINRT ) MAINRTCOUNT )
+            SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,v_publish_alert
+             from MAINTOP
+             where counter >= v_single_consecutive_to_check
+            MINUS
+                SELECT EXECUTING_PRODECURE,'SINGLE', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+                FROM MONITOR_RESULTS_TABLE    
+                WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+                AND OWNER LIKE '%'||v_system_type||'%'
+             MINUS
+                SELECT EXECUTING_PRODECURE,'SINGLE', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+                FROM MONITOR_RESULTS_TABLE_HIST   
+                WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+                AND OWNER LIKE '%'||v_system_type||'%';
+                
+        ELSE
+
+            INSERT INTO MONITOR_RESULTS_TABLE (EXECUTING_PRODECURE,SAMPLE_TYPE, OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT)
+            WITH MAINTOP AS (
+            SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,rank_check,ranked,RT,count(RT) over (partition BY RT) as counter
+            FROM (
+             SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,rank_check,ranked,SUM(rank_check) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP) RT
+             FROM 
+                ( SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,ranked,case when ranked - lag(ranked) over (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP ASC) = 1 THEN 0 ELSE 1 END as rank_check  
+                 FROM (SELECT EXECUTING_PRODECURE, OWNER, OBJECT_NAME, OBJECT_TYPE, TOTAL_TIME_MS, BEGIN_TIME_STAMP, END_TIME_STAMP, END_STATUS, SPEED,
+                   LEAD(SPEED,1,0) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP DESC) before_speed,
+                   ora_hash(EXECUTING_PRODECURE||OWNER||OBJECT_NAME||OBJECT_TYPE) hashing,
+                   LEAD(TOTAL_TIME_MS,1,0) OVER (ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP DESC) before_total_time_ms,
+                   RANK() OVER (partition BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP ASC) ranked
+                   FROM MONITOR_GATHER_ALLSTATS_LOG
+                   WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+                   AND OWNER LIKE '%'||v_system_type||'%'
+                   AND (END_STATUS ='DONE' OR END_STATUS IS NULL)
+                ORDER BY EXECUTING_PRODECURE,OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP DESC) MAIN 
+                WHERE before_total_time_ms*v_pct/100 < TOTAL_TIME_MS
+                   AND BEGIN_TIME_STAMP > SYSDATE - v_single_threshold_alert_days
+                   AND TOTAL_TIME_MS > v_single_threshold_alert) MAINRT ) MAINRTCOUNT )
+                SELECT EXECUTING_PRODECURE,'SINGLE',OWNER,OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP,SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS,SEARCH_ID,v_alert_level,v_metric_type,hashing,v_publish_alert
+                 from MAINTOP
+                 where counter >= v_single_consecutive_to_check
+            MINUS
+                SELECT EXECUTING_PRODECURE,'SINGLE', OWNER, OBJECT_NAME,OBJECT_TYPE, BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+                FROM MONITOR_RESULTS_TABLE    
+                WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+                AND OWNER LIKE '%'||v_system_type||'%'
+             MINUS
+                SELECT EXECUTING_PRODECURE,'SINGLE', OWNER, OBJECT_NAME,OBJECT_TYPE,BEGIN_TIME_STAMP, SPEED,BEFORE_SPEED,TOTAL_TIME_MS,BEFORE_TOTAL_TIME_MS, ALERT_ID, ALERT_LEVEL, METRIC_TYPE, INVESTIGATION_ID,PUBLISH_ALERT
+                FROM MONITOR_RESULTS_TABLE_HIST 
+                WHERE CASE WHEN SUBSTR(v_effected_procedure,0,1) = 'A' THEN SUBSTR(EXECUTING_PRODECURE,0,1) ELSE SUBSTR(v_effected_procedure,0,1) END = SUBSTR(EXECUTING_PRODECURE,0,1)
+                AND OWNER LIKE '%'||v_system_type||'%';
+
+
+        END IF;           
+        COMMIT;
+
+END MONITOR_SINGLE_DATA;
+
+
+
+END MONITOR_ALLSTATS_MNG;
+/

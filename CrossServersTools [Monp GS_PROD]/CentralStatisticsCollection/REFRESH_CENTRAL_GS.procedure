@@ -1,0 +1,135 @@
+CREATE OR REPLACE PROCEDURE REFRESH_CENTRAL_GS IS
+
+v_mon VARCHAR2(20);
+v_db_name VARCHAR2(30);
+l_sql_stmt varchar2(1000);
+l_insert_stmt varchar2(2000);
+l_tmp_space varchar2(1000);
+l_db_stmt varchar2(1000);
+emesg VARCHAR2(250); 
+C_APP_NAME VARCHAR2(200);
+l_update_stmt varchar2(2000);
+
+BEGIN
+
+C_APP_NAME := 'Central Statistics Collections'||' ['||Sys_Context('USERENV','SID')||']';
+
+FOR i IN (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') LOOP
+
+-- checking if the db link is active and valid
+
+l_sql_stmt := 'Select count(1) from user_views@' ||i.DB_LINK|| ' where view_name IN (''ALL_GS_HISTOGRAMS'',''ALL_GS_SET_COLUMNS'')';
+
+BEGIN
+
+  EXECUTE IMMEDIATE l_sql_stmt
+    INTO l_tmp_space;
+
+v_mon := 0;
+
+IF l_tmp_space <> 2 THEN
+
+-- if ALL_GS table is missing from the target DB then skip this database and write to log.
+
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNNING - Missing ALL_GS (statictics) tables from db ' ||i.DB_LINK|| '', NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+    
+    v_mon := 1;
+
+END IF;
+   
+EXCEPTION
+  WHEN OTHERS THEN
+
+    emesg := SQLERRM;
+
+-- if db link is inactive - write to log
+
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNNING - ' || emesg ||' Error detected in DB_LINK: '||i.DB_LINK||'', NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+    
+    v_mon := 1;
+
+END;
+
+-- proceed to execute only if the db link is valid.
+
+IF v_mon = 0 THEN 
+
+-- Gather the database name
+l_db_stmt := 'select name FROM v$database@' ||i.DB_LINK;
+EXECUTE IMMEDIATE l_db_stmt
+INTO v_db_name;
+  
+-- Execute data gathering and insert into tables.
+-- will only collect/insert new or changed rows.
+--------------------------------------------------------------------------------------------------------------------------------------
+
+--  Collect Statistics CENTRAL_GS_HISTOGRAMS
+--------------------------------------------------------------------------------------------------------------------------------------
+l_update_stmt := 'update CENTRAL_GS_HISTOGRAMS
+SET active = 0
+where (database, db_link, table_name, column_name) IN
+(select database, db_link, table_name, column_name from CENTRAL_GS_HISTOGRAMS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||''' and active =1
+MINUS
+select '''||v_db_name||''','''||i.DB_LINK||''',TABLE_NAME,COLUMN_NAME from ALL_GS_HISTOGRAMS@' ||i.DB_LINK||')';
+
+  EXECUTE IMMEDIATE l_update_stmt;
+  
+l_insert_stmt := 'INSERT INTO CENTRAL_GS_HISTOGRAMS (database, db_link, table_name, column_name)
+                                                    (select '''||v_db_name||''','''||i.DB_LINK||''',TABLE_NAME,COLUMN_NAME from ALL_GS_HISTOGRAMS@' ||i.DB_LINK||'
+                                                    MINUS
+                                                    select database, db_link, table_name, column_name from CENTRAL_GS_HISTOGRAMS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||''')';
+  EXECUTE IMMEDIATE l_insert_stmt;
+
+
+l_update_stmt := 'UPDATE CENTRAL_GS_HISTOGRAMS
+set LAST_SAMPLE_DATE = sysdate
+where (database, db_link, table_name, column_name) IN
+(select database, db_link, table_name, column_name from CENTRAL_GS_HISTOGRAMS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||''')
+and active =1';
+
+  EXECUTE IMMEDIATE l_update_stmt;
+
+
+--  Collect Statistics CENTRAL_GS_SET_COLUMNS
+--------------------------------------------------------------------------------------------------------------------------------------
+l_update_stmt := 'update CENTRAL_GS_SET_COLUMNS
+SET active = 0
+where (database,DB_LINK, owner, table_name, column_name, data_type) IN
+(with main as 
+(select database, db_link,owner, table_name, column_name, data_type, high_value_number, low_value_number, high_value_date, low_value_date, high_value_date_offset, low_value_date_offset, distinct_values, density, nulls, avg_len_bytes from CENTRAL_GS_SET_COLUMNS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||'''
+MINUS
+select '''||v_db_name||''','''||i.DB_LINK||''', owner,TABLE_NAME,COLUMN_NAME, data_type, high_value_number, low_value_number, high_value_date, low_value_date, high_value_date_offset, low_value_date_offset, distinct_values, density, nulls, avg_len_bytes from ALL_GS_SET_COLUMNS@' ||i.DB_LINK||')
+select database,db_link,owner, table_name, column_name, data_type from main)';
+
+  EXECUTE IMMEDIATE l_update_stmt;
+    
+l_insert_stmt := 'INSERT INTO CENTRAL_GS_SET_COLUMNS (database,DB_LINK, owner, table_name, column_name, data_type, high_value_number, low_value_number, high_value_date, low_value_date, high_value_date_offset, low_value_date_offset, distinct_values, density, nulls, avg_len_bytes)
+                                                    (select '''||v_db_name||''','''||i.DB_LINK||''', owner,TABLE_NAME,COLUMN_NAME, data_type, high_value_number, low_value_number, high_value_date, low_value_date, high_value_date_offset, low_value_date_offset, distinct_values, density, nulls, avg_len_bytes from ALL_GS_SET_COLUMNS@' ||i.DB_LINK||'
+                                                    MINUS
+                                                    select database, db_link,owner, table_name, column_name, data_type, high_value_number, low_value_number, high_value_date, low_value_date, high_value_date_offset, low_value_date_offset, distinct_values, density, nulls, avg_len_bytes from CENTRAL_GS_SET_COLUMNS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||''')';
+  EXECUTE IMMEDIATE l_insert_stmt;
+  
+  
+l_update_stmt := 'UPDATE CENTRAL_GS_SET_COLUMNS
+set LAST_SAMPLE_DATE = sysdate
+where (database,DB_LINK, table_name, column_name, data_type) IN
+(select database, db_link, table_name, column_name, data_type from CENTRAL_GS_SET_COLUMNS where database ='''||v_db_name||''' and db_link='''||i.DB_LINK||''')
+and active =1';
+
+DBMS_OUTPUT.PUT_LINE( l_update_stmt);
+
+  EXECUTE IMMEDIATE l_update_stmt;
+
+
+END IF;
+
+COMMIT;
+
+END LOOP;
+
+COMMIT;
+
+END REFRESH_CENTRAL_GS;
+/

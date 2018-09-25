@@ -1,0 +1,989 @@
+create or replace package Plan_Monitoring as
+-- The package manages monitoring of explain plans.
+  
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'Plan_Monitoring';
+  VERSION    CONSTANT VARCHAR2(30) := '4.1';
+  
+  -- The procedure adds new SQLs and their plans for schema.
+  ----------------------------------------------------------
+  -- P_Executions_Limit: Limits adding of SQLs with lower number of executions.
+  procedure Add_New_SQLs(P_Schema_Name      in varchar2 default user,
+                         P_Executions_Limit in number   default 100);
+
+  -- The procedure remove plans
+  procedure Remove_Old_Plans(P_Schema_Name  in varchar2 default user,
+                             P_Days_To_Keep in number   default 180);
+
+  -- The procedure accepts a different plan.
+  procedure Accept_Different_Plan(P_Schema_Name     in varchar2 default user,
+                                  P_SQL_ID          in varchar2,
+								  P_Plan_Hash_Value in number);
+
+  -- The procedure rejects an accepted plan.
+  procedure Reject_Accepted_Plan(P_Schema_Name     in varchar2 default user,
+                                 P_SQL_ID          in varchar2,
+								 P_Plan_Hash_Value in number);
+								  
+  -- The procedure rejects a different plan.
+  procedure Reject_Different_Plan(P_Schema_Name     in varchar2 default user,
+                                  P_SQL_ID          in varchar2,
+								  P_Plan_Hash_Value in number);
+											
+  -- The procedure checks for different plans.
+  procedure Find_Different_Plans(P_Schema_Name in varchar2 default user);
+
+  -- The procedure updates execution statistics for SQLs.
+  procedure Update_Execution_Stats(P_Schema_Name in varchar2 default user,
+                                   P_SQL_ID      in varchar2 default NULL);
+								   
+  -- The procedure manages automatic acceptance of different plans.
+  procedure Auto_Accept_Different_Plans(P_Schema_Name          in varchar2 default user,
+                                        Accept_Only_Good_Plans in boolean  default TRUE);
+
+  -- The function decides whether the new plan is acceptable or not.
+  function Is_Plan_Acceptable(P_Min_Accepted_Time in number,
+                              P_Current_Time      in number) return number;
+end Plan_Monitoring;
+/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+create or replace package body Plan_Monitoring as
+
+  v_errm          varchar2(200);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Add_New_SQLs(P_Schema_Name      in varchar2 default user,
+                         P_Executions_Limit in number   default 100) is
+    C_APP_NAME constant varchar2(90) := 'Plan_Monitoring.Add_New_SQLs';
+  begin
+    insert into PM_PLANS(
+	                     SCHEMA_NAME,
+                         SQL_ID,
+                         PLAN_HASH_VALUE,
+						 SQL_FULLTEXT,
+                         EXECUTIONS,
+                         AVG_ELA_TIME_SEC,  
+                         AVG_ROWS_PROCESSED,
+                         AVG_BUFFER_GETS,
+                         AVG_DISK_READS,
+                         MODULE,
+                         ACTION,
+                         INSERT_TIME,
+                         STATS_START_TIME,
+						 STATS_END_TIME
+						)
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   'Not stored yet',
+           Sum(EXECUTIONS),
+           Trunc(Sum(ELAPSED_TIME) / Sum(EXECUTIONS) / 1000000, 3) AVG_ELA_TIME_SEC,  
+           Round(Sum(ROWS_PROCESSED) / Sum(EXECUTIONS))            AVG_ROWS_PROCESSED,
+           Round(Sum(BUFFER_GETS) / Sum(EXECUTIONS))               AVG_BUFFER_GETS,
+           Round(Sum(DISK_READS) / Sum(EXECUTIONS))                AVG_DISK_READS,
+		   Max(MODULE)                                             MODULE,
+           Max(ACTION)                                             ACTION,
+           SYSDATE                                                 INSERT_TIME,
+           Min(To_Date(LAST_LOAD_TIME, 'YYYY-MM-DD/HH24:MI:SS'))   STATS_START_TIME,
+		   Max(LAST_ACTIVE_TIME)                                   STATS_END_TIME
+    from   V$SQL S
+	where  PARSING_SCHEMA_NAME = P_Schema_Name
+	  and  EXECUTIONS >= P_Executions_Limit
+	  and  COMMAND_TYPE in (2, 3, 6, 7)  -- 2:INSERT, 3:SELECT, 6:UPDATE, 7:DELETE
+      and  not exists (select 1 from PM_PLANS where SCHEMA_NAME = S.PARSING_SCHEMA_NAME and SQL_ID = S.SQL_ID)  -- This SQL wasn't saved yet
+      and  not exists (select 1 from V$SQL V  where V.PARSING_SCHEMA_NAME = S.PARSING_SCHEMA_NAME and V.SQL_ID = S.SQL_ID and V.PLAN_HASH_VALUE <> S.PLAN_HASH_VALUE and V.ELAPSED_TIME/V.EXECUTIONS < S.ELAPSED_TIME/S.EXECUTIONS)  -- This is the fastest plan in case of more than one plans for new SQL.
+	group by SQL_ID, 
+	         PLAN_HASH_VALUE;
+	
+	-- Store SQL_FULLTEXT separately as CLOB can't be queried with GROUP BY.
+	update PM_PLANS P
+	set    SQL_FULLTEXT = (select SQL_FULLTEXT from V$SQL where PARSING_SCHEMA_NAME = P.SCHEMA_NAME and SQL_ID = P.SQL_ID and PLAN_HASH_VALUE = P.PLAN_HASH_VALUE and ROWNUM < 2)
+	where  SQL_FULLTEXT like 'Not stored yet';
+	
+	insert into PM_PLANS_STEPS(
+	                           SCHEMA_NAME,
+                               SQL_ID,
+                               PLAN_HASH_VALUE,
+                               PARENT_ID,
+                               ID,
+                               DEPTH,
+                               POSITION,
+                               OPERATION,
+                               OPTIONS,
+                               OBJECT_OWNER,
+                               OBJECT_NAME,
+                               OBJECT_ALIAS,
+                               OBJECT_TYPE,
+                               COST,
+                               CARDINALITY,
+                               BYTES,
+                               ACCESS_PREDICATES,
+                               FILTER_PREDICATES,
+                               OTHER_XML,
+							   ADDRESS,  
+							   HASH_VALUE,
+							   CHILD_NUMBER,
+							   OBJECT_NODE,
+							   OBJECT#,
+							   OPTIMIZER,
+							   SEARCH_COLUMNS,
+							   OTHER_TAG,
+							   PARTITION_START,
+							   PARTITION_STOP,
+							   PARTITION_ID,
+							   OTHER,
+							   DISTRIBUTION,
+							   CPU_COST,
+							   IO_COST,
+							   TEMP_SPACE,
+							   PROJECTION,
+							   TIME,
+							   QBLOCK_NAME,
+							   REMARKS
+	                          )
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   PARENT_ID,
+		   ID,
+		   DEPTH,
+		   POSITION,
+		   OPERATION,
+           OPTIONS,
+           OBJECT_OWNER,
+           OBJECT_NAME,
+           OBJECT_ALIAS,
+           OBJECT_TYPE,
+           COST,
+           CARDINALITY,
+           BYTES,
+           ACCESS_PREDICATES,
+           FILTER_PREDICATES,
+           OTHER_XML,
+		   ADDRESS,  
+		   HASH_VALUE,
+		   CHILD_NUMBER,
+		   OBJECT_NODE,
+		   OBJECT#,
+		   OPTIMIZER,
+		   SEARCH_COLUMNS,
+		   OTHER_TAG,
+		   PARTITION_START,
+		   PARTITION_STOP,
+		   PARTITION_ID,
+		   OTHER,
+		   DISTRIBUTION,
+		   CPU_COST,
+		   IO_COST,
+		   TEMP_SPACE,
+		   PROJECTION,
+		   TIME,
+		   QBLOCK_NAME,
+		   REMARKS
+	from   V$SQL_PLAN P
+	where  SQL_ID in (select SQL_ID from PM_PLANS minus select SQL_ID from PM_PLANS_STEPS)  -- This is new SQL that just added and its plan isn't saved yet
+	  and  PLAN_HASH_VALUE in (select PLAN_HASH_VALUE from PM_PLANS where SQL_ID = P.SQL_ID)
+	  and  CHILD_NUMBER = (select Min(CHILD_NUMBER) from V$SQL_PLAN where SQL_ID = P.SQL_ID and PLAN_HASH_VALUE = P.PLAN_HASH_VALUE);  -- In case there are few child cursors for the same SQL+plan - take only one
+	
+	commit;
+  exception
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Add_New_SQLs; 
+  
+
+
+
+
+
+
+  procedure Remove_Old_Plans(P_Schema_Name  in varchar2 default user,
+                             P_Days_To_Keep in number   default 180) is
+    C_APP_NAME constant varchar2(90) := 'Plan_Monitoring.Remove_Old_Plans';
+  begin
+    delete PM_PLANS
+    where  STATS_END_TIME < Trunc(SYSDATE - P_Days_To_Keep);
+
+    delete PM_PLANS_STEPS 
+    where  (SCHEMA_NAME, SQL_ID, PLAN_HASH_VALUE) not in (select SCHEMA_NAME, SQL_ID, PLAN_HASH_VALUE from PM_PLANS);
+
+	commit;
+  exception
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Remove_Old_Plans; 
+  
+
+
+
+
+
+
+
+
+
+
+
+  procedure Find_Different_Plans(P_Schema_Name in varchar2 default user) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Find_Different_Plans';
+  begin
+    insert into PM_DIFF_PLANS(
+	                          SCHEMA_NAME,
+                              SQL_ID,
+                              PLAN_HASH_VALUE,
+							  SQL_FULLTEXT,
+                              EXECUTIONS,
+                              AVG_ELA_TIME_SEC,  
+                              AVG_ROWS_PROCESSED,
+                              AVG_BUFFER_GETS,
+                              AVG_DISK_READS,
+                              MODULE,
+                              ACTION,
+                              INSERT_TIME,
+							  STATS_START_TIME,
+							  STATS_END_TIME
+						     )
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   'Not stored yet',
+           Sum(EXECUTIONS),
+           Trunc(Sum(ELAPSED_TIME) / Sum(EXECUTIONS) / 1000000, 3) AVG_ELA_TIME_SEC,  
+           Round(Sum(ROWS_PROCESSED) / Sum(EXECUTIONS))            AVG_ROWS_PROCESSED,
+           Round(Sum(BUFFER_GETS) / Sum(EXECUTIONS))               AVG_BUFFER_GETS,
+           Round(Sum(DISK_READS) / Sum(EXECUTIONS))                AVG_DISK_READS,
+           Max(MODULE)                                             MODULE,
+           Max(ACTION)                                             ACTION,
+           SYSDATE                                                 INSERT_TIME,
+           Min(To_Date(LAST_LOAD_TIME, 'YYYY-MM-DD/HH24:MI:SS'))   STATS_START_TIME,
+		   Max(LAST_ACTIVE_TIME)                                   STATS_END_TIME
+    from   V$SQL S
+	where  PARSING_SCHEMA_NAME = P_Schema_Name
+	  and  COMMAND_TYPE in (2, 3, 6, 7)  -- 2:INSERT, 3:SELECT, 6:UPDATE, 7:DELETE
+	  and  exists (select 1 from PM_PLANS where SCHEMA_NAME = P_Schema_Name and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE <> S.PLAN_HASH_VALUE)  -- This SQL is already saved with different plan.
+      and  not exists (select 1 from PM_PLANS where SCHEMA_NAME = P_Schema_Name and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE)  -- This plan is not saved yet as accepted plan.
+	  and  not exists (select 1 from PM_REJECTED_PLANS where SCHEMA_NAME = P_Schema_Name and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and REJECTION_TIME >= S.LAST_ACTIVE_TIME) -- This plan was not already rejected.
+      and  not exists (select 1 from PM_DIFF_PLANS where SCHEMA_NAME = P_Schema_Name and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and STATS_END_TIME >= S.LAST_ACTIVE_TIME)-- This plan is not saved yet with the same statistics.
+	  group by SQL_ID, 
+	           PLAN_HASH_VALUE;
+			
+	-- Write warning message to log that different plan was found.
+	if SQL%FOUND then
+	  Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Different plan was found', null, Log_Manager.Msg_Type_Warning);
+	end if;
+	
+    -- Store SQL_FULLTEXT separately as CLOB can't be queried with GROUP BY.
+	update PM_DIFF_PLANS P
+	set    SQL_FULLTEXT = (select SQL_FULLTEXT from V$SQL where PARSING_SCHEMA_NAME = P.SCHEMA_NAME and SQL_ID = P.SQL_ID and PLAN_HASH_VALUE = P.PLAN_HASH_VALUE and ROWNUM < 2)
+	where  SQL_FULLTEXT like 'Not stored yet';
+		
+	insert into PM_DIFF_PLANS_STEPS(
+	                                SCHEMA_NAME,
+                                    SQL_ID,
+                                    PLAN_HASH_VALUE,
+                                    PARENT_ID,
+                                    ID,
+                                    DEPTH,
+                                    POSITION,
+                                    OPERATION,
+                                    OPTIONS,
+                                    OBJECT_OWNER,
+                                    OBJECT_NAME,
+                                    OBJECT_ALIAS,
+                                    OBJECT_TYPE,
+                                    CARDINALITY,
+                                    COST,
+                                    BYTES,
+                                    ACCESS_PREDICATES,
+                                    FILTER_PREDICATES,
+                                    OTHER_XML,
+									ADDRESS,  
+							        HASH_VALUE,
+							        CHILD_NUMBER,
+							        OBJECT_NODE,
+							        OBJECT#,
+							        OPTIMIZER,
+							        SEARCH_COLUMNS,
+							        OTHER_TAG,
+							        PARTITION_START,
+							        PARTITION_STOP,
+							        PARTITION_ID,
+							        OTHER,
+							        DISTRIBUTION,
+							        CPU_COST,
+							        IO_COST,
+							        TEMP_SPACE,
+							        PROJECTION,
+							        TIME,
+							        QBLOCK_NAME,
+							        REMARKS
+	                               )
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   PARENT_ID,
+		   ID,
+		   DEPTH,
+		   POSITION,
+		   OPERATION,
+           OPTIONS,
+           OBJECT_OWNER,
+           OBJECT_NAME,
+           OBJECT_ALIAS,
+           OBJECT_TYPE,
+           CARDINALITY,
+           COST,
+           BYTES,
+           ACCESS_PREDICATES,
+           FILTER_PREDICATES,
+           OTHER_XML,
+		   ADDRESS,  
+		   HASH_VALUE,
+		   CHILD_NUMBER,
+		   OBJECT_NODE,
+		   OBJECT#,
+		   OPTIMIZER,
+		   SEARCH_COLUMNS,
+		   OTHER_TAG,
+		   PARTITION_START,
+		   PARTITION_STOP,
+		   PARTITION_ID,
+		   OTHER,
+		   DISTRIBUTION,
+		   CPU_COST,
+		   IO_COST,
+		   TEMP_SPACE,
+		   PROJECTION,
+		   TIME,
+		   QBLOCK_NAME,
+		   REMARKS
+	from   V$SQL_PLAN P
+	where  (SQL_ID, PLAN_HASH_VALUE) in (select SQL_ID, PLAN_HASH_VALUE from PM_DIFF_PLANS minus select SQL_ID, PLAN_HASH_VALUE from PM_DIFF_PLANS_STEPS)  -- This is new plan that was just added and its steps aren't saved yet
+	  and  CHILD_NUMBER = (select Min(CHILD_NUMBER) from V$SQL_PLAN where SQL_ID = P.SQL_ID and PLAN_HASH_VALUE = P.PLAN_HASH_VALUE);  -- In case there are few child cursors for the same SQL+plan - take only one
+	
+	commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Find_Different_Plans;
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Reject_Different_Plan(P_Schema_Name     in varchar2 default user,
+                                  P_SQL_ID          in varchar2,
+								  P_Plan_Hash_Value in number) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Reject_Different_Plan';
+	
+	P_Are_Plans_Left number;
+  begin
+    begin
+		insert into PM_REJECTED_PLANS(
+									  SCHEMA_NAME,
+									  SQL_ID,
+									  PLAN_HASH_VALUE,
+									  SQL_FULLTEXT,
+									  EXECUTIONS,
+									  AVG_ELA_TIME_SEC,  
+									  AVG_ROWS_PROCESSED,
+									  AVG_BUFFER_GETS,
+									  AVG_DISK_READS,
+                                      MODULE,
+                                      ACTION,
+									  STATS_START_TIME,
+									  STATS_END_TIME,
+									  REJECTION_TIME
+									 )
+		select P_Schema_Name,
+			   P_SQL_ID,
+			   P_Plan_Hash_Value,
+			   SQL_FULLTEXT,
+			   EXECUTIONS,
+			   AVG_ELA_TIME_SEC,  
+			   AVG_ROWS_PROCESSED,
+			   AVG_BUFFER_GETS,
+			   AVG_DISK_READS,
+               MODULE,
+               ACTION,
+			   STATS_START_TIME,
+			   STATS_END_TIME,
+			   SYSDATE		   
+		from   PM_DIFF_PLANS
+		where  SCHEMA_NAME     = P_Schema_Name
+		  and  SQL_ID          = P_SQL_ID
+		  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+    exception
+      when DUP_VAL_ON_INDEX then
+	    null;
+	end;
+	
+	delete PM_DIFF_PLANS_STEPS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	  
+	delete PM_DIFF_PLANS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	
+	select Count(*)
+	into   P_Are_Plans_Left
+	from   PM_SQLS_WITH_DIFF_PLANS_VW
+	where  SCHEMA_NAME = P_Schema_Name;
+
+	if P_Are_Plans_Left = 0 then
+	  update LOG
+	  set    MESSAGE_TYPE = 10
+	  where  SCHEMA = P_Schema_Name
+	    and  MESSAGE = 'Different plan was found'
+		and  MESSAGE_TYPE = 1;
+	end if;
+	
+	commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Reject_Different_Plan;
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Reject_Accepted_Plan(P_Schema_Name     in varchar2 default user,
+                                 P_SQL_ID          in varchar2,
+							     P_Plan_Hash_Value in number) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Reject_Accepted_Plan';
+	
+  begin
+    begin
+		insert into PM_REJECTED_PLANS(
+									  SCHEMA_NAME,
+									  SQL_ID,
+									  PLAN_HASH_VALUE,
+									  SQL_FULLTEXT,
+									  EXECUTIONS,
+									  AVG_ELA_TIME_SEC,  
+									  AVG_ROWS_PROCESSED,
+									  AVG_BUFFER_GETS,
+									  AVG_DISK_READS,
+                                      MODULE,
+                                      ACTION,
+									  STATS_START_TIME,
+                                      STATS_END_TIME,
+									  REJECTION_TIME
+									 )
+		select P_Schema_Name,
+			   P_SQL_ID,
+			   P_Plan_Hash_Value,
+			   SQL_FULLTEXT,
+			   EXECUTIONS,
+			   AVG_ELA_TIME_SEC,  
+			   AVG_ROWS_PROCESSED,
+			   AVG_BUFFER_GETS,
+			   AVG_DISK_READS,
+               MODULE,
+               ACTION,
+			   STATS_START_TIME,
+               STATS_END_TIME,
+			   SYSDATE	  
+		from   PM_PLANS
+		where  SCHEMA_NAME     = P_Schema_Name
+		  and  SQL_ID          = P_SQL_ID
+		  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+    exception
+      when DUP_VAL_ON_INDEX then
+	    null;
+	end;
+	
+	delete PM_PLANS_STEPS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	  
+	delete PM_PLANS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	
+	commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Reject_Accepted_Plan;
+  
+
+
+
+
+
+
+
+
+
+
+
+  procedure Accept_Different_Plan(P_Schema_Name     in varchar2 default user,
+                                  P_SQL_ID          in varchar2,
+								  P_Plan_Hash_Value in number) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Accept_Different_Plan';
+	
+	P_Are_Plans_Left number;
+  begin
+    insert into PM_PLANS(
+	                     SCHEMA_NAME,
+                         SQL_ID,
+                         PLAN_HASH_VALUE,
+                         SQL_FULLTEXT,
+                         EXECUTIONS,
+                         AVG_ELA_TIME_SEC,  
+                         AVG_ROWS_PROCESSED,
+                         AVG_BUFFER_GETS,
+                         AVG_DISK_READS,
+                         MODULE,
+                         ACTION,
+                         INSERT_TIME,
+						 STATS_START_TIME,
+						 STATS_END_TIME
+						)
+	select P_Schema_Name,
+           P_SQL_ID,
+		   P_Plan_Hash_Value,
+		   SQL_FULLTEXT,
+		   EXECUTIONS,
+           AVG_ELA_TIME_SEC,  
+           AVG_ROWS_PROCESSED,
+           AVG_BUFFER_GETS,
+           AVG_DISK_READS,
+           MODULE,
+           ACTION,
+           SYSDATE INSERT_TIME,
+		   STATS_START_TIME,
+		   STATS_END_TIME
+	from   PM_DIFF_PLANS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	  
+	insert into PM_PLANS_STEPS(
+	                           SCHEMA_NAME,
+                               SQL_ID,
+                               PLAN_HASH_VALUE,
+                               PARENT_ID,
+                               ID,
+                               DEPTH,
+                               POSITION,
+                               OPERATION,
+                               OPTIONS,
+                               OBJECT_OWNER,
+                               OBJECT_NAME,
+                               OBJECT_ALIAS,
+                               OBJECT_TYPE,
+                               COST,
+                               CARDINALITY,
+                               BYTES,
+                               ACCESS_PREDICATES,
+                               FILTER_PREDICATES,
+                               OTHER_XML,
+							   ADDRESS,  
+							   HASH_VALUE,
+							   CHILD_NUMBER,
+							   OBJECT_NODE,
+							   OBJECT#,
+							   OPTIMIZER,
+							   SEARCH_COLUMNS,
+							   OTHER_TAG,
+							   PARTITION_START,
+							   PARTITION_STOP,
+							   PARTITION_ID,
+							   OTHER,
+							   DISTRIBUTION,
+							   CPU_COST,
+							   IO_COST,
+							   TEMP_SPACE,
+							   PROJECTION,
+							   TIME,
+							   QBLOCK_NAME,
+							   REMARKS
+	                          )
+	select P_Schema_Name,
+	       P_SQL_ID,
+		   P_Plan_Hash_Value,
+		   PARENT_ID,
+		   ID,
+		   DEPTH,
+		   POSITION,
+		   OPERATION,
+           OPTIONS,
+           OBJECT_OWNER,
+           OBJECT_NAME,
+           OBJECT_ALIAS,
+           OBJECT_TYPE,
+           COST,
+           CARDINALITY,
+           BYTES,
+           ACCESS_PREDICATES,
+           FILTER_PREDICATES,
+           OTHER_XML,
+		   ADDRESS,  
+		   HASH_VALUE,
+		   CHILD_NUMBER,
+		   OBJECT_NODE,
+	       OBJECT#,
+		   OPTIMIZER,
+		   SEARCH_COLUMNS,
+		   OTHER_TAG,
+		   PARTITION_START,
+   	       PARTITION_STOP,
+		   PARTITION_ID,
+		   OTHER,
+		   DISTRIBUTION,
+		   CPU_COST,
+		   IO_COST,
+		   TEMP_SPACE,
+		   PROJECTION,
+		   TIME,
+		   QBLOCK_NAME,
+		   REMARKS
+	from   PM_DIFF_PLANS_STEPS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	
+	delete PM_DIFF_PLANS_STEPS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	  
+	delete PM_DIFF_PLANS
+	where  SCHEMA_NAME     = P_Schema_Name
+	  and  SQL_ID          = P_SQL_ID
+	  and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	  
+	begin
+	  delete PM_REJECTED_PLANS
+	  where  SCHEMA_NAME     = P_Schema_Name
+	    and  SQL_ID          = P_SQL_ID
+	    and  PLAN_HASH_VALUE = P_Plan_Hash_Value;
+	exception
+	  when NO_DATA_FOUND then
+	    null;
+	end;
+	
+	select Count(*)
+	into   P_Are_Plans_Left
+	from   PM_SQLS_WITH_DIFF_PLANS_VW
+	where  SCHEMA_NAME = P_Schema_Name;
+
+	if P_Are_Plans_Left = 0 then
+	  update LOG
+	  set    MESSAGE_TYPE = 10
+	  where  SCHEMA = P_Schema_Name
+	    and  MESSAGE = 'Different plan was found'
+		and  MESSAGE_TYPE = 1;
+	end if;
+	
+	commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Accept_Different_Plan;
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Update_Execution_Stats(P_Schema_Name in varchar2 default user,
+                                   P_SQL_ID      in varchar2 default NULL) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Update_Execution_Stats';
+  begin
+    insert into PM_PLANS(
+	                     SCHEMA_NAME,
+                         SQL_ID,
+                         PLAN_HASH_VALUE,
+						 SQL_FULLTEXT,
+                         EXECUTIONS,
+                         AVG_ELA_TIME_SEC,  
+                         AVG_ROWS_PROCESSED,
+                         AVG_BUFFER_GETS,
+                         AVG_DISK_READS,
+                         MODULE,
+                         ACTION,
+                         INSERT_TIME,
+                         STATS_START_TIME,
+						 STATS_END_TIME
+						)
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   'Not stored yet',
+           Sum(EXECUTIONS),
+           Trunc(Sum(ELAPSED_TIME) / Sum(EXECUTIONS) / 1000000, 3) AVG_ELA_TIME_SEC,  
+           Round(Sum(ROWS_PROCESSED) / Sum(EXECUTIONS))            AVG_ROWS_PROCESSED,
+           Round(Sum(BUFFER_GETS) / Sum(EXECUTIONS))               AVG_BUFFER_GETS,
+           Round(Sum(DISK_READS) / Sum(EXECUTIONS))                AVG_DISK_READS,
+		   Max(MODULE)                                             MODULE,
+           Max(ACTION)                                             ACTION,
+           SYSDATE                                                 INSERT_TIME,
+           Min(To_Date(LAST_LOAD_TIME, 'YYYY-MM-DD/HH24:MI:SS'))   STATS_START_TIME,
+		   Max(LAST_ACTIVE_TIME)                                   STATS_END_TIME
+    from   V$SQL S
+	where  PARSING_SCHEMA_NAME = P_Schema_Name
+      and  SQL_ID = Nvl(P_SQL_ID, SQL_ID)
+	  and  COMMAND_TYPE in (2, 3, 6, 7)  -- 2:INSERT, 3:SELECT, 6:UPDATE, 7:DELETE
+      and  EXECUTIONS > 0  -- Not taking only loaded plans
+      and  not exists (select 1 from PM_PLANS where SCHEMA_NAME = S.PARSING_SCHEMA_NAME and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and STATS_END_TIME >= S.LAST_ACTIVE_TIME)  -- Accepted plan does not exist with up-to-date stats.
+      and  exists (select 1 from PM_PLANS where SCHEMA_NAME = S.PARSING_SCHEMA_NAME and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and STATS_END_TIME < S.LAST_ACTIVE_TIME)  -- Accepted plan exists with older stats.
+    group by SQL_ID, 
+	         PLAN_HASH_VALUE;
+
+
+    insert into PM_DIFF_PLANS(
+	                          SCHEMA_NAME,
+                              SQL_ID,
+                              PLAN_HASH_VALUE,
+							  SQL_FULLTEXT,
+                              EXECUTIONS,
+                              AVG_ELA_TIME_SEC,  
+                              AVG_ROWS_PROCESSED,
+                              AVG_BUFFER_GETS,
+                              AVG_DISK_READS,
+                              MODULE,
+                              ACTION,
+                              INSERT_TIME,
+							  STATS_START_TIME,
+							  STATS_END_TIME
+						     )
+	select P_Schema_Name,
+	       SQL_ID,
+		   PLAN_HASH_VALUE,
+		   'Not stored yet',
+           Sum(EXECUTIONS),
+           Trunc(Sum(ELAPSED_TIME) / Sum(EXECUTIONS) / 1000000, 3) AVG_ELA_TIME_SEC,  
+           Round(Sum(ROWS_PROCESSED) / Sum(EXECUTIONS))            AVG_ROWS_PROCESSED,
+           Round(Sum(BUFFER_GETS) / Sum(EXECUTIONS))               AVG_BUFFER_GETS,
+           Round(Sum(DISK_READS) / Sum(EXECUTIONS))                AVG_DISK_READS,
+           Max(MODULE)                                             MODULE,
+           Max(ACTION)                                             ACTION,
+           SYSDATE                                                 INSERT_TIME,
+           Min(To_Date(LAST_LOAD_TIME, 'YYYY-MM-DD/HH24:MI:SS'))   STATS_START_TIME,
+		   Max(LAST_ACTIVE_TIME)                                   STATS_END_TIME
+    from   V$SQL S
+	where  PARSING_SCHEMA_NAME = P_Schema_Name
+      and  SQL_ID = Nvl(P_SQL_ID, SQL_ID)
+	  and  COMMAND_TYPE in (2, 3, 6, 7)  -- 2:INSERT, 3:SELECT, 6:UPDATE, 7:DELETE
+	  and  not exists (select 1 from PM_DIFF_PLANS where SCHEMA_NAME = S.PARSING_SCHEMA_NAME and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and STATS_END_TIME >= S.LAST_ACTIVE_TIME)  -- Accepted plan does not exist with up-to-date stats.
+      and  exists (select 1 from PM_DIFF_PLANS where SCHEMA_NAME = S.PARSING_SCHEMA_NAME and SQL_ID = S.SQL_ID and PLAN_HASH_VALUE = S.PLAN_HASH_VALUE and STATS_END_TIME < S.LAST_ACTIVE_TIME)  -- Accepted plan exists with older stats.
+    group by SQL_ID, 
+	           PLAN_HASH_VALUE;
+	
+	commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Update_Execution_Stats;
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Auto_Accept_Different_Plans(P_Schema_Name          in varchar2 default user,
+                                        Accept_Only_Good_Plans in boolean  default TRUE) is
+    C_APP_NAME      constant varchar2(90) := 'Plan_Monitoring.Auto_Accept_Different_Plans';
+  
+	P_Are_Plans_Left number;
+  begin
+	if Accept_Only_Good_Plans then		
+		for Plan_Rec in (select V1.SQL_ID,
+								V1.PLAN_HASH_VALUE
+						 from	PM_SQLS_WITH_DIFF_PLANS_VW V1,
+                                (select SQL_ID,
+                                        Min(AVG_ELA_TIME_SEC) MIN_TIME
+                                 from   PM_PLANS
+                                 where  SCHEMA_NAME = P_Schema_Name
+                                 group by SQL_ID) MIN_TIME_FOR_SQLS
+						 where  SCHEMA_NAME = P_Schema_Name
+						   and  IS_NEW = 1
+                           and  V1.SQL_ID = MIN_TIME_FOR_SQLS.SQL_ID
+                           and  (Plan_Monitoring.Is_Plan_Acceptable(MIN_TIME_FOR_SQLS.MIN_TIME,
+                                                                    AVG_ELA_TIME_SEC) = 1
+                                 or AVG_ELA_TIME_SEC < 1)) loop                        
+		  
+		  Accept_Different_Plan(P_Schema_Name,
+								Plan_Rec.SQL_ID,
+								Plan_Rec.PLAN_HASH_VALUE);							
+		end loop;
+	else
+	    for Plan_Rec in (select SQL_ID,
+								PLAN_HASH_VALUE
+						 from	PM_SQLS_WITH_DIFF_PLANS_VW V1
+						 where  SCHEMA_NAME = P_Schema_Name
+						   and  IS_NEW = 1) loop
+		  
+		  Accept_Different_Plan(P_Schema_Name,
+								Plan_Rec.SQL_ID,
+								Plan_Rec.PLAN_HASH_VALUE);							
+		end loop;
+	end if;
+	
+	select Count(*)
+	into   P_Are_Plans_Left
+	from   PM_SQLS_WITH_DIFF_PLANS_VW
+	where  SCHEMA_NAME = P_Schema_Name;
+
+	if P_Are_Plans_Left = 0 then
+	  update LOG
+	  set    MESSAGE_TYPE = 10
+	  where  SCHEMA = P_Schema_Name
+	    and  MESSAGE = 'Different plan was found'
+		and  MESSAGE_TYPE = 1;
+		
+	  commit;
+	end if;
+	    
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+	  rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'Error: ' || v_errm, null, Log_Manager.Msg_Type_Error);
+  end Auto_Accept_Different_Plans;
+
+
+
+
+
+
+  function Is_Plan_Acceptable(P_Min_Accepted_Time in number,
+                              P_Current_Time      in number) return number as
+  begin
+    if P_Min_Accepted_Time <= 2 and P_Current_Time >= 4 then
+      return 0;
+    elsif P_Min_Accepted_Time <= 10 and P_Current_Time >= 20 then
+      return 0;
+    elsif P_Min_Accepted_Time <= 30 and P_Current_Time >= 90 then
+      return 0;
+    else
+      return 1;
+    end if;
+  end Is_Plan_Acceptable;
+end Plan_Monitoring;
+/
+
+GRANT EXECUTE ON Plan_Monitoring TO PUBLIC
+/
+
+begin
+  EXECUTE IMMEDIATE 'CREATE PUBLIC SYNONYM PLAN_MONITORING FOR Plan_Monitoring';
+exception
+  when OTHERS then
+    null;
+end;
+/
+
+BEGIN
+  delete VERSIONS
+  where  COMPONENT_NAME = Plan_Monitoring.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+					   UPDATE_TIME)
+			  values (Plan_Monitoring.C_APP_NAME,
+			          Plan_Monitoring.VERSION,
+					  SYSDATE);
+  commit;
+END;
+/

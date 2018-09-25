@@ -1,0 +1,210 @@
+CREATE OR REPLACE PROCEDURE REFRASH_ACTIVE_APP_LIST
+(last_alive_time IN DATE DEFAULT SYSDATE-7 )
+
+IS
+
+v_num number(1);
+l_sql_stmt varchar2(2000);
+emesg VARCHAR2(250);
+l_tmp_space varchar2(2000);
+v_mon VARCHAR2(20);
+l_database VARCHAR2(30);
+
+   TYPE OwnerList IS TABLE OF VARCHAR2(30);
+   v_owner OwnerList;
+
+
+begin
+
+-- Prepare ACTIVE_APP_LIST table
+EXECUTE IMMEDIATE 'ALTER TABLE GS_SEARCH_TYPES_DET disable CONSTRAINT FK_SRCH_TYPES_SYSTEM_ID';
+EXECUTE IMMEDIATE 'delete from ACTIVE_APP_LIST';
+
+-------------------------------------------------------------------------------------------------
+-- Refrash Adapter Apps
+-------------------------------------------------------------------------------------------------
+
+for i in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') loop
+
+-------------------------------------------------------------------------------------------------
+-- This block checks if the db link is valid, id user dba_apps has access to dba_apps,
+-- and if there are any IC_CNFG_INSTANCE tables on the db at all, else it will skip this db link.
+    BEGIN
+
+    l_sql_stmt := 'select view_name from dba_views@'||i.db_link||' where view_name= ''ADAPTER'' and rownum <2';
+
+    l_tmp_space := NULL;
+
+      EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_tmp_space;
+
+    DBMS_OUTPUT.PUT_LINE( l_tmp_space);
+
+
+        EXCEPTION
+
+                  WHEN OTHERS THEN
+                  emesg := SQLERRM;
+                  DBMS_OUTPUT.PUT_LINE (emesg);
+
+                  l_tmp_space := NULL;
+
+    END;
+-------------------------------------------------------------------------------------------------
+
+-- Procced only if the check block is valid.
+        IF l_tmp_space = 'ADAPTER' THEN
+
+        -- retrieve the Database name
+
+        l_sql_stmt := 'SELECT NAME FROM v$database@'||i.db_link;
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_database;
+
+        DBMS_OUTPUT.PUT_LINE ('inside db link: '|| i.db_link);
+
+        -- retrieve the list of relvant sechmas from the database
+        l_sql_stmt := 'select owner from dba_views@'||i.db_link||' where view_name =''ADAPTER''';
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        BULK COLLECT INTO v_owner;
+
+
+        -- for each schema retrieve the IC_CNFG_INSTANCE data
+        FOR idx IN 1.. v_owner.count LOOP
+
+        DBMS_OUTPUT.put_line('Dynamic FETCH  : ' || v_owner(idx));
+
+       l_sql_stmt := 'insert into ACTIVE_APP_LIST (id,database,ENVIRONMENT,APPLICATION,db_link,system_type,db_schema,SAMPLE_DATE,IC_VERSION)
+       VALUES (ora_hash('''||l_database||v_owner(idx)||i.db_link||''',4294967295),
+       '''||l_database||''',
+       CASE
+        WHEN '''||v_owner(idx)||''' LIKE ''%PREPROD%'' THEN ''PREPROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%PROD%'' THEN ''PROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%TEST%'' THEN ''TEST''
+        WHEN '''||v_owner(idx)||''' LIKE ''%UAT%''  THEN ''UAT''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BETA%'' THEN ''BETA''
+        WHEN '''||v_owner(idx)||''' LIKE ''%DEMO%'' THEN ''DEMO''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BCK%'' THEN ''BACKUP_SCHEMA''
+        ELSE ''n/a'' END,
+       '''||v_owner(idx)||''',
+       '''||i.db_link||''',
+       ''ADAPTER'',
+       '''||v_owner(idx)||''',
+       SYSDATE,
+       NULL)';
+
+       DBMS_OUTPUT.PUT_LINE( l_sql_stmt);
+
+       EXECUTE IMMEDIATE l_sql_stmt;
+
+        END LOOP;
+
+        COMMIT;
+
+        END IF;
+
+COMMIT;
+end loop;
+
+
+-------------------------------------------------------------------------------------------------
+-- Refrash IC Apps
+-------------------------------------------------------------------------------------------------
+
+for i in (SELECT db_link FROM USER_DB_LINKS WHERE db_link LIKE 'GS_%') loop
+
+-------------------------------------------------------------------------------------------------
+-- This block checks if the db link is valid, id user dba_apps has access to dba_apps,
+-- and if there are any IC_CNFG_INSTANCE tables on the db at all, else it will skip this db link.
+    BEGIN
+
+    l_sql_stmt := 'select object_name from dba_objects@'||i.db_link||' where object_name= ''IC_CNFG_INSTANCE'' and rownum <2';
+
+    l_tmp_space := NULL;
+
+      EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_tmp_space;
+
+    DBMS_OUTPUT.PUT_LINE( l_tmp_space);
+
+
+        EXCEPTION
+
+                  WHEN OTHERS THEN
+                  emesg := SQLERRM;
+                  DBMS_OUTPUT.PUT_LINE (emesg);
+
+                  l_tmp_space := NULL;
+
+    END;
+-------------------------------------------------------------------------------------------------
+
+-- Procced only if the check block is valid.
+        IF l_tmp_space = 'IC_CNFG_INSTANCE' THEN
+
+
+        -- retrieve the Database name
+
+        l_sql_stmt := 'SELECT NAME FROM v$database@'||i.db_link;
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        INTO l_database;
+
+        DBMS_OUTPUT.PUT_LINE ('inside db link: '|| i.db_link);
+
+        -- retrieve the list of relvant sechmas from the database
+        l_sql_stmt := 'select owner from dba_tables@'||i.db_link||' where table_name =''IC_CNFG_INSTANCE''';
+
+
+        EXECUTE IMMEDIATE l_sql_stmt
+        BULK COLLECT INTO v_owner;
+
+
+        -- for each schema retrieve the IC_CNFG_INSTANCE data
+        FOR idx IN 1.. v_owner.count LOOP
+
+        DBMS_OUTPUT.put_line('Dynamic FETCH  : ' || v_owner(idx));
+
+       l_sql_stmt := 'insert into ACTIVE_APP_LIST (id,database,ENVIRONMENT,APPLICATION,db_link,system_type,db_schema,SAMPLE_DATE,IC_VERSION)
+       (SELECT ora_hash('''||l_database||v_owner(idx)||i.db_link||''',4294967295),
+       '''||l_database||''',
+       CASE
+        WHEN '''||v_owner(idx)||''' LIKE ''%PREPROD%'' THEN ''PREPROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%PROD%'' THEN ''PROD''
+        WHEN '''||v_owner(idx)||''' LIKE ''%TEST%'' THEN ''TEST''
+        WHEN '''||v_owner(idx)||''' LIKE ''%UAT%''  THEN ''UAT''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BETA%'' THEN ''BETA''
+        WHEN '''||v_owner(idx)||''' LIKE ''%DEMO%'' THEN ''DEMO''
+        WHEN '''||v_owner(idx)||''' LIKE ''%BCK%'' THEN ''BACKUP_SCHEMA''
+        ELSE ''n/a'' END "ENVIRONMENT",
+       '''||v_owner(idx)||''',
+       '''||i.db_link||''',
+       ''IC'',
+       '''||v_owner(idx)||''' DB_SCHEMA,
+       SYSDATE,
+       VERSION
+       FROM '||v_owner(idx)||'.IC_CNFG_INSTANCE@'||i.db_link||'
+       WHERE ID != 0
+       AND ROWNUM <2
+       AND LAST_ALIVE_TIME > '''||last_alive_time||''')';
+
+       DBMS_OUTPUT.PUT_LINE( l_sql_stmt);
+
+       EXECUTE IMMEDIATE l_sql_stmt;
+
+        END LOOP;
+
+        COMMIT;
+
+        END IF;
+
+COMMIT;
+end loop;
+
+
+EXECUTE IMMEDIATE 'ALTER TABLE GS_SEARCH_TYPES_DET enable CONSTRAINT FK_SRCH_TYPES_SYSTEM_ID';
+
+end;
+/

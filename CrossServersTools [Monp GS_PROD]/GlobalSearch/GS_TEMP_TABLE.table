@@ -1,0 +1,4 @@
+CREATE GLOBAL TEMPORARY TABLE gs_temp_table (
+  SEARCH_UID  NUMBER(30),
+  RESULT  CLOB
+) ON COMMIT DELETE ROWS;                       

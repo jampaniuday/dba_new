@@ -1,0 +1,117 @@
+CREATE OR REPLACE PROCEDURE dba_apps.refresh_ALL_ARCHIVE_DEFINITION IS
+	num_err number := 0;
+    cmd  varchar2(32000) := 'create or replace view ALL_ARCHIVE_DEFINITIONS as ';
+	aad_cols varchar2(1000);
+	aad_cols_with_colons varchar2(2000);
+	aad_cols_with_new varchar2(2000);
+	aad_cols_with_set varchar2(2000);
+begin
+
+	  FOR curr IN (select 'alter table ' || owner ||'.USER_ARCHIVE_DEFINITIONS add '|| column_name || ' ' || data_type cmd
+					from (
+					SELECT *
+					  FROM (SELECT owner
+							  FROM dba_tables
+							 WHERE table_name = 'USER_ARCHIVE_DEFINITIONS') ow,
+						   (SELECT DISTINCT
+								   column_name,
+								   data_type || '(' || NVL (data_precision, data_length) || ')'
+									  data_type
+							  FROM dba_tab_columns
+							 WHERE table_name = 'USER_ARCHIVE_DEFINITIONS') col
+					MINUS
+					SELECT owner,
+						   column_name,
+						   data_type || '(' || NVL (data_precision, data_length) || ')' data_type
+					  FROM dba_tab_columns
+					 WHERE table_name = 'USER_ARCHIVE_DEFINITIONS'
+					 ))
+	  LOOP
+		BEGIN
+		 execute immediate (curr.cmd);
+		EXCEPTION
+		 when others then
+		  dbms_output.put_line('Failed executing ' || curr.cmd || '. ' || SQLERRM);
+		  num_err := 1;
+		END;
+	  END LOOP;
+	  
+	  if num_err = 1 then
+		dbms_output.put_line('USER_ARCHIVE_DEFINITIONS Tables are not identical.');
+	  end if;
+  
+	FOR part
+	IN (select owner, table_name
+		from dba_tables
+		where table_name = 'USER_ARCHIVE_DEFINITIONS'
+		order by owner)
+	LOOP
+	  if cmd = 'create or replace view ALL_ARCHIVE_DEFINITIONS as ' then  
+		-- first table
+        select listagg(column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols
+            into aad_cols
+            from dba_tab_columns
+            where table_name = 'USER_ARCHIVE_DEFINITIONS'
+            and owner =  part.owner
+            and column_name <> 'OWNER'
+            order by column_id;
+
+		cmd := cmd || 'select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+	  else
+		cmd := cmd || ' union all select ''' || part.owner || ''' owner, ' || aad_cols || ' from ' || part.owner || '.' || part.table_name || ' ' || substr(part.owner, GREATESt(length(part.owner)-27, 1), 28) || '_a';
+	  end if;
+	END LOOP;
+
+	execute immediate (cmd);
+    
+----- grants
+
+	EXECUTE IMMEDIATE 'create or replace public synonym all_archive_definitions FOR all_archive_definitions';
+
+	EXECUTE IMMEDIATE 'grant select on all_archive_definitions to public';
+	
+	select listagg(column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols,
+		   listagg(':'||column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols_with_colons,
+		   listagg(':NEW.'||column_name, ', ') WITHIN GROUP (ORDER BY column_id) aad_cols_with_new,
+		   listagg(column_name || ' = :' ||column_name , ', ') WITHIN GROUP (ORDER BY column_id) aad_cols_with_set
+	into aad_cols, aad_cols_with_colons, aad_cols_with_new, aad_cols_with_set
+	from user_tab_columns
+	where table_name = 'ALL_ARCHIVE_DEFINITIONS'
+	and column_name <> 'OWNER'
+	order by column_id;
+	
+	cmd := 'CREATE OR REPLACE TRIGGER io_archive_definitions
+			  INSTEAD OF INSERT OR UPDATE OR DELETE
+			  ON all_archive_definitions
+			DECLARE
+			BEGIN
+  IF INSERTING THEN
+    EXECUTE IMMEDIATE ''insert into '' || :NEW.OWNER || ''.user_archive_definitions (' || aad_cols || ')                                                                                             
+    values (' || aad_cols_with_colons || ')'' USING ' || aad_cols_with_new || ';  
+  ELSIF DELETING THEN
+    EXECUTE IMMEDIATE ''delete from '' || :OLD.OWNER || ''.user_archive_definitions WHERE ORDER_IN_PROCESS = :ORDER_IN_PROCESS''
+    USING :OLD.ORDER_IN_PROCESS;
+  ELSIF UPDATING THEN
+    EXECUTE IMMEDIATE ''update '' || :NEW.OWNER || ''.user_archive_definitions 
+     set ' || aad_cols_with_set ||
+    ' where ORDER_IN_PROCESS = :ORDER_IN_PROCESS2''
+    USING ' || aad_cols_with_new || ',:OLD.ORDER_IN_PROCESS;
+  END IF;
+    END;';
+
+	EXECUTE IMMEDIATE cmd;
+end;
+/
+
+BEGIN
+    dba_apps.refresh_ALL_ARCHIVE_DEFINITION;
+END;
+/
+
+grant execute on dba_apps.refresh_ALL_ARCHIVE_DEFINITION to public;
+
+grant select on ALL_ARCHIVE_DEFINITIONs to PUBLIC;
+
+create or replace public synonym ALL_ARCHIVE_DEFINITIONs  for ALL_ARCHIVE_DEFINITIONs ;
+
+

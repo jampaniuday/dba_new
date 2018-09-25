@@ -1,0 +1,41 @@
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (0, 'DIR');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (1, 'FTP');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (2, 'MAIL');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (3, 'MQ');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (5, 'WEB_UPLOAD');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (6, 'SCHEDULER');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (7, 'FIX');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (8, 'SFTP');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (9, 'DB');
+Insert into CONNECTIVITY_TYPE
+   (ID, NAME)
+ Values
+   (10, 'BASIC');
+COMMIT;

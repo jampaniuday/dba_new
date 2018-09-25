@@ -1,0 +1,485 @@
+id column =1 and
+xsl column = 
+
+<xsl:transform xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+    version="1.0">
+    <xsl:output method="xml" encoding="UTF-8" indent="yes" />
+    <xsl:param name="FILE_NAME" />
+    <xsl:param name="UPDATE_TIME" />
+    <xsl:param name="ENV_SERVER" />
+    <xsl:param name="SCHEMA" />
+    
+    <xsl:template match="/">
+    <root>
+    
+        <xsl:for-each select="//adapter">
+            <!--  ADAPTER   -->
+            <adapter>
+                <name> <xsl:value-of select="@label" /> </name>
+                <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>                
+            </adapter>
+            
+            <!--  ADAPTER RELATED DATA -->
+            <xsl:call-template name="extract-adapter-data">
+                <xsl:with-param name="adapter" select="." />
+                <xsl:with-param name="adapterName" select="@label" />
+            </xsl:call-template>
+        </xsl:for-each>    
+        
+    </root>    
+    </xsl:template>
+    
+    <xsl:template name="extract-adapter-data">    
+        <xsl:param name="adapter"  />
+        <xsl:param name="adapterName" />        
+    
+        <!--  MQ   -->
+        <xsl:for-each select="$adapter/source[contains(@className,'MQSource') or contains(@className,'MQJMSSource')]">
+            <xsl:call-template name="add-mq-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'0'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        <xsl:for-each select="$adapter/sink[contains(@className,'MQSink') or contains(@className,'MQJMSSink')]">
+            <xsl:call-template name="add-mq-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'1'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        
+        <!--  DIR   -->
+        <xsl:for-each select="$adapter/source[contains(@className,'DirectorySource')]">
+            <xsl:call-template name="add-dir-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'0'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        <xsl:for-each select="$adapter/sink[contains(@className,'FileSink')]">
+            <xsl:call-template name="add-dir-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'1'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        
+        <!--  MAIL   -->
+        <xsl:for-each select="$adapter/source[contains(@className,'IMAPSource') or contains(@className,'POP3Source')]">
+            <xsl:call-template name="add-mail-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'0'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        <xsl:for-each select="$adapter/sink[contains(@className,'SMTPSink')]">
+            <xsl:call-template name="add-mail-details">                
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'1'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        
+        <!--  FTP   -->
+        <!--<xsl:for-each select="$adapter/source[contains(@className,'IMAPSource') or contains(@className,'POP3Source')]">
+            <xsl:call-template name="add-ftp-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'0'" />
+            </xsl:call-template>
+        </xsl:for-each>-->
+        <xsl:for-each select="$adapter/sink[contains(@className,'FtpSink')]">
+            <xsl:call-template name="add-ftp-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'1'" />
+            </xsl:call-template>
+        </xsl:for-each>
+        
+        <!--  WEB_UPLOAD   -->
+        <xsl:for-each select="$adapter/source[contains(@className,'HTTPSource')]">
+            <xsl:call-template name="add-web-upload-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'0'" />
+                <xsl:with-param name="url"  select="./property[contains(translate(@name,'H','h'),'host')]"/>    
+            </xsl:call-template>
+        </xsl:for-each>
+        <xsl:for-each select="$adapter/sink[contains(@className,'HTTPSink') or contains(@className,'HTTPSocketSink')]">
+            <xsl:call-template name="add-web-upload-details">
+                <xsl:with-param name="adapterName" select="$adapterName" />
+                <xsl:with-param name="direction" select="'1'" />
+                <xsl:with-param name="url"  select="./property[contains(translate(@name,'U','u'),'url')]"/>    
+            </xsl:call-template>
+        </xsl:for-each>
+        
+        
+        <!--  ADAPTER TRANSFORMER   -->
+        <xsl:for-each select="$adapter/transformer">
+            <xsl:call-template name="add-transformer-details"/>                
+        </xsl:for-each>        
+        
+         
+         <!-- Split link record logic to detect: address to transformer record and route record  separately           
+                     add-address-2-transformer-details/addressName /transformerName                 
+                    add-route-details/fromName/toName
+                    when sink is "multiSink": create both ROUTE record and MQ connectivity record per each sink
+          -->
+          
+         <!--  ADDRESS TO TRANSFORMER RECORD / ROUTE RECORD -->
+        <xsl:for-each select=" //linkTo[../../@label=$adapterName]">
+            <xsl:variable name="fromNodeType" select="name(../.)" />
+            <xsl:variable name="fromName" select="../@name" />                
+            <xsl:variable name="toName" select="." />    
+            <xsl:variable name="toNodeType" >    
+                <xsl:call-template name="get-to-node-type">
+                    <xsl:with-param name="nameAttr" select="." />
+                    <xsl:with-param name="adapter" select="$adapter" />
+                </xsl:call-template>
+            </xsl:variable>            
+            <xsl:variable name="isMultiSink" >    
+                <xsl:call-template name="check-if-multi-sink">
+                    <xsl:with-param name="nameAttr" select="." />
+                    <xsl:with-param name="adapter" select="$adapter" />
+                </xsl:call-template>
+            </xsl:variable>
+            <xsl:choose>                        
+                <xsl:when test="not($fromNodeType='transformer') and $toNodeType='transformer'">    
+                    <xsl:variable name="transformerOrder">
+                        <xsl:for-each select="$adapter/transformer">
+                            <xsl:variable name="position" select="position()" />            
+                            <xsl:if test="@name=$toName">
+                                <xsl:value-of select="$position" />
+                            </xsl:if>            
+                        </xsl:for-each>
+                    </xsl:variable>                    
+                    <xsl:call-template name="add-address-2-transformer-details">
+                        <xsl:with-param name="adapter" select="$adapter" />
+                        <xsl:with-param name="addressName" select="$fromName" />
+                        <xsl:with-param name="transformerName" select="$toName" />
+                        <xsl:with-param name="transformerOrder" select="$transformerOrder" />
+                    </xsl:call-template>
+                    
+                    <xsl:call-template name="get-routes-from-transformer" >
+                        <xsl:with-param name="adapter" select="$adapter" />
+                        <xsl:with-param name="fromName" select="$fromName" />
+                        <xsl:with-param name="transformerName" select="$toName" />
+                    </xsl:call-template>                    
+                </xsl:when>
+                
+                <xsl:when test="$fromNodeType='transformer' and $toNodeType='transformer'">    
+                    <xsl:call-template name="get-source-addresses-from-transformer">
+                        <xsl:with-param name="adapter" select="$adapter" />
+                        <xsl:with-param name="sourceTransformerName" select="$fromName" />
+                        <xsl:with-param name="targetTransformerName" select="$toName" />
+                    </xsl:call-template>                    
+                </xsl:when>                 
+                
+                <xsl:when test="not($fromNodeType='transformer') and not($toNodeType='transformer') and $isMultiSink='true'">        
+                    
+                    <xsl:for-each select="$adapter/sink[@name=$toName]/property/@name">                    
+                        <xsl:if test="substring(.,0,5)='sink' and contains(../.,'|MQ|')">
+                            <xsl:variable name="currentSinkName"   select="substring-before(../.,'|MQ|')"  />
+                            <xsl:call-template name="add-route-details">                            
+                                <xsl:with-param name="fromName" select="$fromName" />
+                                <xsl:with-param name="toName" select="$currentSinkName" />
+                                <xsl:with-param name="adapterName" select="$adapterName" />
+                            </xsl:call-template>
+                            <xsl:call-template name="add-mq-details-from-multi-sink">
+                                <xsl:with-param name="adapterName" select="$adapterName" />
+                                <xsl:with-param name="mqDetails" select="../." />
+                                <xsl:with-param name="currentAddressName" select="$currentSinkName" />
+                            </xsl:call-template>                            
+                        </xsl:if>
+                    </xsl:for-each> 
+                </xsl:when>                     
+                
+                <xsl:when test="not($fromNodeType='transformer') and not($toNodeType='transformer') and $isMultiSink='false'">        
+                    <xsl:call-template name="add-route-details">        
+                        <xsl:with-param name="fromName" select="$fromName" />
+                        <xsl:with-param name="toName" select="$toName" />
+                        <xsl:with-param name="adapterName" select="$adapterName" />
+                    </xsl:call-template>
+                </xsl:when>                                
+            </xsl:choose>            
+         </xsl:for-each>           
+        
+      </xsl:template>
+
+
+    <xsl:template name="add-mq-details">
+        <xsl:param name="adapterName" />
+        <xsl:param name="direction" />
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, host, Queue name, 
+            port, channel, queueMng
+        -->
+        <connectivity>
+            <connectivity_type>3</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="./@name" /> </address_name>
+            <direction> <xsl:value-of select="$direction" /> </direction>
+            <server> <xsl:value-of select="./property[@name='host']" /> </server>
+            <queue_name> <xsl:value-of select="./property[@name='queue']" /> </queue_name>
+            <port> <xsl:value-of select="./property[@name='port']" /> </port>
+            <channel> <xsl:value-of select="./property[@name='channel']" /> </channel>
+            <queue_mgr> <xsl:value-of select="./property[@name='queueMng']" /> </queue_mgr>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>                
+    </xsl:template>
+    
+    <xsl:template name="add-mq-details-from-multi-sink">
+        <xsl:param name="adapterName" />
+        <xsl:param name="mqDetails" />    
+        <xsl:param name="currentAddressName" />    
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, host, Queue name, 
+            port, channel, queueMng
+        -->
+        <connectivity>
+            <connectivity_type>3</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="$currentAddressName" /> </address_name>
+            <direction>1</direction>
+            <server> <xsl:value-of select="substring-before(substring-after($mqDetails,'MQ|'), '|')" /> </server>
+            <queue_name> <xsl:value-of select="substring-after(substring-after(substring-after(substring-after(substring-after($mqDetails,'MQ|'), '|'), '|'), '|'), '|')" /> </queue_name>
+            <port> <xsl:value-of select="substring-before(substring-after(substring-after($mqDetails,'MQ|'), '|'), '|')" /> </port>
+            <channel> <xsl:value-of select="substring-before(substring-after(substring-after(substring-after($mqDetails,'MQ|'), '|'), '|'), '|')" /> </channel>
+            <queue_mgr> <xsl:value-of select="substring-before(substring-after(substring-after(substring-after(substring-after($mqDetails,'MQ|'), '|'), '|'), '|'), '|')" /> </queue_mgr>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>                
+    </xsl:template>
+
+    <xsl:template name="add-dir-details">
+        <xsl:param name="adapterName" />
+        <xsl:param name="direction" />
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, directory
+        -->
+        <connectivity>
+            <connectivity_type>0</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="./@name" /> </address_name>
+            <direction> <xsl:value-of select="$direction" /> </direction>
+            <directory> <xsl:value-of select="./property[@name='directory']" /> </directory>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>        
+    </xsl:template>
+    
+    <xsl:template name="add-mail-details">
+        <xsl:param name="adapterName" />
+        <xsl:param name="direction" />
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, host, userName/to
+        -->
+        <connectivity>
+            <connectivity_type>2</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="./@name" /> </address_name>
+            <direction> <xsl:value-of select="$direction" /> </direction>
+            <server> <xsl:value-of select="./property[@name='host']" /> </server>
+            <xsl:choose>
+                <xsl:when test="$direction='1'">            
+                    <email> <xsl:value-of select="translate(./property[@name='to'],',','|')" /> </email>
+                </xsl:when>
+                <xsl:otherwise>
+                    <email> <xsl:value-of select="./property[@name='username']" /> </email>
+                </xsl:otherwise>
+            </xsl:choose>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>                    
+    </xsl:template>
+    
+    <xsl:template name="add-ftp-details">
+        <xsl:param name="adapterName" />
+        <xsl:param name="direction" />
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, host, directory, port, username
+        -->
+        <connectivity>
+            <connectivity_type>1</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="./@name" /> </address_name>
+            <direction> <xsl:value-of select="$direction" /> </direction>
+            <server> <xsl:value-of select="./property[@name='host']" /> </server>
+            <directory> <xsl:value-of select="./property[@name='directory']" /> </directory>
+            <port> <xsl:value-of select="./property[@name='port']" /> </port>
+            <user_name> <xsl:value-of select="./property[@name='username']" /> </user_name>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>        
+    </xsl:template>
+    
+    
+    <xsl:template name="add-web-upload-details">
+        <xsl:param name="adapterName" />
+        <xsl:param name="direction" />    
+        <xsl:param name="url" />    
+        <!--
+            Connectivity type, adapter name, source/sink name, Direction, URL   
+        -->
+        <connectivity>
+            <connectivity_type>5</connectivity_type>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <update_time> <xsl:value-of select="$UPDATE_TIME" /> </update_time>
+            <address_name> <xsl:value-of select="./@name" /> </address_name>
+            <direction> <xsl:value-of select="$direction" /> </direction>
+            <server> <xsl:value-of select="$url" /> </server>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </connectivity>                
+    </xsl:template>
+    
+    
+    <xsl:template name="add-transformer-details">    
+        <!--
+            Connectivity type transformer name, className,...    
+        -->
+        <adapter_transformer>
+            <name> <xsl:value-of select="./@name" /> </name>
+            <class_name> <xsl:value-of select="./@className" /> </class_name>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </adapter_transformer>
+    </xsl:template>
+    
+    <xsl:template name="add-route-details">        
+        <xsl:param name="fromName" />        
+        <xsl:param name="toName" />    
+        <xsl:param name="adapterName" />
+        
+        <!--
+            ROUTE, adapter name, from name, to name
+        -->
+        <address_route>
+            <adapter_name> <xsl:value-of select="$adapterName" /> </adapter_name>
+            <source_address_name> <xsl:value-of select="$fromName" />  </source_address_name>
+            <destination_address_name> <xsl:value-of select="$toName" />  </destination_address_name>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </address_route>                    
+    </xsl:template>    
+    
+    <xsl:template name="add-address-2-transformer-details">    
+        <xsl:param name="adapter" />    
+        <xsl:param name="addressName" />        
+        <xsl:param name="transformerName" />
+        <xsl:param name="transformerOrder" />    
+        <!--
+            ADDRESS_TO_TRANSFORMER, adapter name, address name, transformer name, transformer order, parameters
+        -->
+        <address_to_transformer>
+            <adapter_name> <xsl:value-of select="$adapter/@label" /> </adapter_name>            
+            <address_name> <xsl:value-of select="$addressName" /> </address_name>
+            <transformer_name> <xsl:value-of select="$transformerName" /> </transformer_name>
+            <transformer_order> <xsl:value-of select="$transformerOrder" /> </transformer_order>
+            <parameters>
+                <xsl:for-each select="$adapter/transformer[@name=$transformerName]/property">
+                    <xsl:value-of select="concat(./@name,'=',.,';')" />
+                </xsl:for-each>    
+            </parameters>
+            <path> <xsl:value-of select="concat($ENV_SERVER,'|',$SCHEMA,'|',$FILE_NAME)" /> </path>
+        </address_to_transformer>                        
+    </xsl:template>        
+    
+    <xsl:template name="get-to-node-type">
+        <xsl:param name="nameAttr" />
+        <xsl:param name="adapter" />
+        <xsl:choose>
+            <xsl:when test="$adapter/source[@name=$nameAttr]">
+                <xsl:value-of select="'source'" />
+            </xsl:when>
+            <xsl:when test="$adapter/sink[@name=$nameAttr]">
+                <xsl:value-of select="'sink'" />
+            </xsl:when>
+            <xsl:when test="$adapter/transformer[@name=$nameAttr]">
+                <xsl:value-of select="'transformer'" />
+            </xsl:when>        
+        </xsl:choose>
+    </xsl:template>    
+        
+    <xsl:template name="check-if-multi-sink">
+        <xsl:param name="nameAttr" />
+        <xsl:param name="adapter" />
+        <xsl:choose>            
+            <xsl:when test="$adapter/sink[@name=$nameAttr] and contains($adapter/sink[@name=$nameAttr]/@className,'MultiSink')">
+                <xsl:value-of select="'true'" />
+            </xsl:when>
+            <xsl:otherwise>
+                <xsl:value-of select="'false'" />
+            </xsl:otherwise>        
+        </xsl:choose>
+    </xsl:template>    
+    
+    <xsl:template name="get-routes-from-transformer">
+        <xsl:param name="adapter" />
+        <xsl:param name="fromName" />
+        <xsl:param name="transformerName"  />        
+        <!-- 
+             go over linkTo nodes of transformer
+             check the node type of the link:
+             1. if not transformer - add route record (call add-route-details)
+             2. if transformer recall get-routes-from-transformer
+         -->        
+        <xsl:for-each select="$adapter/transformer[@name=$transformerName]/linkTo">        
+            <xsl:variable name="toNodeType" >    
+                <xsl:call-template name="get-to-node-type">
+                    <xsl:with-param name="nameAttr" select="." />
+                    <xsl:with-param name="adapter" select="$adapter" />
+                </xsl:call-template>
+            </xsl:variable>
+            <xsl:choose>
+            <xsl:when test="not($toNodeType='transformer')">
+                <xsl:call-template name="add-route-details">
+                    <xsl:with-param name="fromName" select="$fromName" />
+                    <xsl:with-param name="toName" select="." />
+                    <xsl:with-param name="adapterName" select="$adapter/@label" />
+                </xsl:call-template>
+            </xsl:when>
+            <xsl:otherwise>
+                <xsl:call-template name="get-routes-from-transformer">
+                    <xsl:with-param name="adapter" select="$adapter" />
+                    <xsl:with-param name="fromName" select="$fromName" />
+                    <xsl:with-param name="transformerName" select="." />
+                </xsl:call-template>
+            </xsl:otherwise>
+            </xsl:choose>        
+        </xsl:for-each>                
+    </xsl:template>
+        
+    <xsl:template name="get-source-addresses-from-transformer">
+        <xsl:param name="adapter" />
+        <xsl:param name="sourceTransformerName" />
+        <xsl:param name="targetTransformerName" />
+        
+        <xsl:variable name="transformerOrder">
+            <xsl:for-each select="$adapter/transformer">
+                <xsl:variable name="position" select="position()" />            
+                <xsl:if test="@name=$targetTransformerName">
+                    <xsl:value-of select="$position" />
+                </xsl:if>            
+            </xsl:for-each>
+        </xsl:variable>
+        
+        <xsl:for-each select="$adapter/source/linkTo[.=$sourceTransformerName]">            
+            <xsl:call-template name="add-address-2-transformer-details">
+                <xsl:with-param name="adapter"  select="$adapter" />
+                <xsl:with-param name="addressName" select="../@name" />
+                <xsl:with-param name="transformerName" select="$targetTransformerName" />
+                <xsl:with-param name="transformerOrder" select="$transformerOrder" />  
+            </xsl:call-template>             
+        </xsl:for-each>    
+        <xsl:for-each select="$adapter/sink/linkTo[.=$sourceTransformerName]">        
+            <xsl:call-template name="add-address-2-transformer-details">
+                <xsl:with-param name="adapter"  select="$adapter" />
+                <xsl:with-param name="addressName" select="../@name" />
+                <xsl:with-param name="transformerName" select="$targetTransformerName" />
+                <xsl:with-param name="transformerOrder" select="$transformerOrder" />
+            </xsl:call-template>             
+        </xsl:for-each>    
+        <xsl:for-each select="$adapter/transformer/linkTo[.=$sourceTransformerName]">        
+            <xsl:call-template name="get-source-addresses-from-transformer">
+                <xsl:with-param name="adapter"  select="$adapter" />
+                <xsl:with-param name="sourceTransformerName" select="../@name" />
+                <xsl:with-param name="targetTransformerName" select="$targetTransformerName" />
+            </xsl:call-template>             
+        </xsl:for-each>            
+                
+    </xsl:template>                    
+                    
+    
+</xsl:transform>
+

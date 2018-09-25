@@ -1,0 +1,52 @@
+create or replace force view SC_INDEXES_SIZES as
+with INDEXES_SIZES_TEMP as (select SCHEMA_NAME,
+					              CAPTURE_TIME,
+								  TABLE_NAME,
+								  SEGMENT_NAME INDEX_NAME,
+								  Sum(SIZE_MB) SIZE_MB,
+								  Max(IS_LAST_CAPTURE) IS_LAST_CAPTURE
+						  from    SC_SEGMENTS_SIZES
+						  where   SEGMENT_TYPE = 'INDEX'
+						  group by SCHEMA_NAME,
+								   CAPTURE_TIME,
+								   TABLE_NAME,
+								   SEGMENT_NAME)
+select SCHEMA_NAME,
+       TABLE_NAME,
+	   INDEX_NAME,
+       CAPTURE_TIME,
+	   IS_LAST_CAPTURE,
+	   Trunc(CAPTURE_TIME - Nvl((select CAPTURE_TIME 
+	                             from   INDEXES_SIZES_TEMP IST2 
+					             where  IST2.SCHEMA_NAME  = IST.SCHEMA_NAME 
+						           and  IST2.INDEX_NAME   = IST.INDEX_NAME 
+						           and  IST2.CAPTURE_TIME = (select Max(CAPTURE_TIME)
+							 			                     from   INDEXES_SIZES_TEMP IST3
+												             where  IST3.SCHEMA_NAME  = IST2.SCHEMA_NAME
+													           and  IST3.INDEX_NAME   = IST2.INDEX_NAME
+													           and  IST3.CAPTURE_TIME < IST.CAPTURE_TIME)), CAPTURE_TIME)) DAYS_SINCE_LAST_CAPTURE,
+	   SIZE_MB,
+	   SIZE_MB - Nvl((select SIZE_MB 
+	                  from   INDEXES_SIZES_TEMP IST2 
+					  where  IST2.SCHEMA_NAME  = IST.SCHEMA_NAME 
+						and  IST2.INDEX_NAME   = IST.INDEX_NAME 
+						and  IST2.CAPTURE_TIME = (select Max(CAPTURE_TIME)
+												  from   INDEXES_SIZES_TEMP IST3
+												  where  IST3.SCHEMA_NAME  = IST2.SCHEMA_NAME
+													and  IST3.INDEX_NAME   = IST2.INDEX_NAME
+													and  IST3.CAPTURE_TIME < IST.CAPTURE_TIME)), SIZE_MB) CHANGE_IN_SIZE_MB,
+	   SIZE_MB - Nvl((select SIZE_MB 
+	                  from   INDEXES_SIZES_TEMP IST2 
+					  where  IST2.SCHEMA_NAME  = IST.SCHEMA_NAME 
+						and  IST2.INDEX_NAME   = IST.INDEX_NAME 
+						and  IST2.CAPTURE_TIME = (select Min(CAPTURE_TIME)
+												  from   INDEXES_SIZES_TEMP IST3
+												  where  IST3.SCHEMA_NAME  = IST2.SCHEMA_NAME
+													and  IST3.INDEX_NAME   = IST2.INDEX_NAME
+													and  IST3.CAPTURE_TIME < IST.CAPTURE_TIME)), SIZE_MB) TOTAL_CHANGE_IN_SIZE_MB							
+from   INDEXES_SIZES_TEMP IST
+order by SCHEMA_NAME,
+		 TABLE_NAME,
+         INDEX_NAME,
+		 CAPTURE_TIME desc
+/

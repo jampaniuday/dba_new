@@ -1,0 +1,22 @@
+CREATE OR REPLACE FORCE VIEW V_HR3_TRADES AS
+SELECT
+	created_date,
+	trading_party,
+	counter_party,
+	prime_broker
+FROM
+	hr3_prod.a_ta@hr3prod ta,
+	hr3_prod.m_fx_noe@hr3prod noe
+WHERE ta.ID = noe.ID
+  AND ta.txn_type = 1
+  AND noe.trade_type NOT IN
+             (13 /*Filter out offset noes*/, 14 /*Filter out netting noes*/)
+  AND ta.trading_party <> 4000298                        /*Traiana Client*/
+  AND ta.counter_party <> 4000298                       /*Traiana Client */
+  AND noe.prime_broker NOT IN
+                       (4000448 /* Traiana PB */, 4010254 /* Traiana N/A */)
+  AND noe.lifecycle_status NOT IN
+         (3000003 /*Invalid*/, 3000005 /*Error*/,
+          3000009 /*Request_Replace*/, 3000010 /*Replaced*/)
+;
+comment on table V_HR3_TRADES is 'Harmony 3: This view is a plan list of eligible  trades.';

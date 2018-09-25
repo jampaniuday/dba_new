@@ -1,0 +1,13 @@
+CREATE OR REPLACE FORCE VIEW V_HR4_TRADES AS 
+SELECT   
+	creation_date created_date, 
+	tp_id trading_party, 
+	cp_id counter_party,
+	pb_id prime_broker
+FROM 
+	fxcm_prod.fd_fxpb_linear_ta@hr4_link ta
+WHERE noe_life_status <> 5 /* replaced */
+  and noe_life_status <> 6 /* deleted */
+  and noe_life_status <> 7 /* invalid */
+;
+comment on table V_HR4_TRADES is 'Harmony 4: This view is a plan list of eligible harmony4 trades.';

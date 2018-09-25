@@ -1,0 +1,17 @@
+create or replace force view SC_TOP_10_TABLES_PER_SCHEMA as
+select SCHEMA_NAME,
+       TABLE_NAME,
+       CAPTURE_TIME,
+       SIZE_MB
+from   (select SCHEMA_NAME,
+               TABLE_NAME,
+               CAPTURE_TIME,
+               SIZE_MB,
+               Row_Number() over (partition by SCHEMA_NAME order by SIZE_MB desc nulls last) RANK
+        from   SC_TABLES_SIZES_WITH_INDEXES 
+        where  IS_LAST_CAPTURE = 1)
+where  RANK <= 10
+order by SCHEMA_NAME,
+         RANK asc
+/
+		 

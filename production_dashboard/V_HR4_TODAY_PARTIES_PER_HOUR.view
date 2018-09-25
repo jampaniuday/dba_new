@@ -1,0 +1,17 @@
+CREATE OR REPLACE FORCE VIEW V_HR4_TODAY_PARTIES_PER_HOUR AS
+SELECT  
+    to_char(TRUNC (created_date,'HH24'),'HH24:MI') TIME, 
+	(select name from fxcm_prod.a_organization@hr4_link where id=trading_party)	trading_party, 
+	(select name from fxcm_prod.a_organization@hr4_link where id=counter_party)	counter_party, 
+	(select name from fxcm_prod.a_organization@hr4_link where id=prime_broker)	prime_broker,
+    COUNT (*) NOES
+FROM V_HR4_TRADES
+WHERE created_date >= TRUNC (SYSDATE)
+GROUP BY 
+    TRUNC (created_date,'HH24'),
+    trading_party,
+    counter_party,
+    prime_broker
+ORDER BY TRUNC (created_date,'HH24')
+;
+comment on table V_HR4_TODAY_PARTIES_PER_HOUR is 'Harmony 4: This view sums tp/cp/pb trades per hour from the beginning of the day (12:00 AM)';

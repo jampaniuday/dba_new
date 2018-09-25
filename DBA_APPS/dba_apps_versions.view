@@ -1,0 +1,38 @@
+declare
+
+v_counter number;
+
+begin
+
+select count(1) 
+into v_counter
+from dba_objects
+where object_name ='PARTITION_MANAGER_LOG';
+
+
+	IF v_counter > 0 THEN
+	execute immediate 'create or replace force view dba_apps_versions
+	as
+	(select ''1.2'' "SCHEMA_BASE_VERSION",DATA_MANAGER.FUNC_VERSION() "DATA_MANAGER"
+								   ,CMN_DB_UTILS_PKG.FUNC_VERSION() "CMN_DB_UTILS_PKG" 
+								   ,Gather_Statistics.FUNC_VERSION() "Gather_Statistics" 
+								   ,PARTITION_MANAGER.FUNC_VERSION() "PARTITION_MANAGER" 
+								   ,SAFE_UPGRADE.FUNC_VERSION() "SAFE_UPGRADE" 
+								   from dual)';
+								
+	ELSE
+
+	execute immediate 'create or replace force view dba_apps_versions
+	as
+	(select ''1.2'' "SCHEMA_BASE_VERSION",DATA_MANAGER.FUNC_VERSION() "DATA_MANAGER"
+								   ,CMN_DB_UTILS_PKG.FUNC_VERSION() "CMN_DB_UTILS_PKG" 
+								   ,Gather_Statistics.FUNC_VERSION() "Gather_Statistics" 
+								   ,''N/A'' "PARTITION_MANAGER" 
+								   ,SAFE_UPGRADE.FUNC_VERSION() "SAFE_UPGRADE" 
+								   from dual)';
+								   
+	END IF;
+
+END;
+/
+								   

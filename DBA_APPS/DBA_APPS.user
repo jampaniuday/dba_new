@@ -1,0 +1,111 @@
+set echo on
+
+WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK WHENEVER OSERROR  EXIT SQL.SQLCODE ROLLBACK 
+
+declare
+     lSchemaName varchar2(30) := 'SYS';
+begin
+  if ( SYS_CONTEXT ('USERENV', 'SESSION_USER')<> upper(lSchemaName)) THEN
+         raise_application_error(-20001, 'This script should be run under SYS user only.');
+  end if;
+end;
+/
+
+set echo on
+
+CREATE USER DBA_APPS
+  IDENTIFIED BY DBA_APPS
+  DEFAULT TABLESPACE USERS
+  TEMPORARY TABLESPACE TEMP
+  PROFILE DEFAULT
+  ACCOUNT UNLOCK;
+  -- 2 Roles for DBA_APPS 
+ALTER USER DBA_APPS DEFAULT ROLE ALL;
+
+
+GRANT CONNECT TO DBA_APPS;
+
+GRANT RESOURCE TO DBA_APPS;
+
+grant select any table to dba_apps with admin OPTION;
+
+GRANT CREATE ANY SYNONYM TO DBA_APPS;
+
+GRANT CREATE PUBLIC SYNONYM TO DBA_APPS;
+
+GRANT DROP PUBLIC SYNONYM TO DBA_APPS;
+
+GRANT ALTER SESSION TO DBA_APPS;
+
+GRANT COMMENT ANY TABLE TO DBA_APPS;
+
+GRANT CREATE ANY VIEW TO DBA_APPS;
+
+GRANT ALTER USER TO DBA_APPS;
+
+GRANT SELECT ANY DICTIONARY TO DBA_APPS;
+
+grant alter system to dba_apps;
+
+grant execute on DBMS_LOCK to dba_apps;
+
+GRANT SELECT ON DBA_INDEXES TO DBA_APPS;
+
+GRANT SELECT ON DBA_LOBS TO DBA_APPS;
+
+GRANT SELECT ON DBA_RECYCLEBIN TO DBA_APPS;
+
+GRANT SELECT ON DBA_SEGMENTS TO DBA_APPS;
+
+GRANT SELECT ON DBA_TABLES TO DBA_APPS;
+
+GRANT EXECUTE ON DBMS_WORKLOAD_REPOSITORY TO DBA_APPS;
+
+GRANT SELECT ON V_$SQL TO DBA_APPS;
+
+GRANT SELECT ON V_$SQL_PLAN TO DBA_APPS;
+
+GRANT SELECT ON DBA_TAB_PARTITIONS TO DBA_APPS WITH GRANT OPTION;
+
+GRANT SELECT ON DBA_ind_PARTITIONS TO DBA_APPS WITH GRANT OPTION;
+
+grant analyze any to dba_apps;
+
+grant advisor to dba_apps;
+
+grant create any job to dba_apps;
+
+grant dba to dba_apps;
+
+grant create any table to dba_apps;
+
+grant drop any table to dba_apps;
+
+grant drop any sequence to dba_apps;
+
+grant drop any view to dba_apps;
+
+grant drop any procedure to dba_apps;
+
+grant alter any table to dba_apps;
+
+GRANT ADMINISTER SQL MANAGEMENT OBJECT to dba_apps;
+
+grant create trigger to dba_apps;
+
+DECLARE
+l_sql_stmt varchar2(1000);
+BEGIN
+for i in (select owner, table_name
+           from dba_tables
+           where table_name = 'USER_ARCHIVE_DEFINITIONS') LOOP
+                                   
+l_sql_stmt := 'grant select on '||i.owner||'.'||i.table_name||' to DBA_APPS with grant option';
+execute immediate l_sql_stmt;
+end loop;
+end;
+/
+       
+conn dba_apps/DBA_APPS
+@DBA_APPS.sql
+	   

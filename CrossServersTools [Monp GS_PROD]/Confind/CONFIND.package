@@ -1,0 +1,160 @@
+CREATE OR REPLACE package CONFIND is
+
+   PROCEDURE get_data;
+   PROCEDURE post_data;
+
+end CONFIND;
+/
+
+
+CREATE OR REPLACE package body CONFIND is
+
+  PROCEDURE get_data IS
+
+  emesg VARCHAR2(1000);
+  L_WHAT VARCHAR2(4000);
+  
+  l_errm varchar2(2000);
+  l_sqlcode number;
+  l_var VARCHAR2(30);
+
+ BEGIN
+
+
+-- Cleanup the local tables.
+  BEGIN
+
+    DELETE from mapping;
+    delete from ADDRESS_TO_TRANSFORMER;
+    delete from ADDRESS_ROUTE;
+    delete from CONNECTIVITY;
+    DELETE FROM cnfg_instance;
+    DELETE FROM ADAPTER;
+    DELETE FROM ADAPTER_TRANSFORMER;
+    
+    commit;
+
+  EXCEPTION
+    WHEN OTHERS THEN
+
+      emesg := SQLERRM;
+      insert into confind_log values('Problem deleting the base tables: '||emesg||'', systimestamp);
+      raise_application_error(-20115, 'Problem deleting the base tables: '||emesg||'');
+
+  END;
+
+
+-- Populate all tables
+  BEGIN
+
+        for cur_sys in (SELECT db_schema,db_link,ID,IC_VERSION 
+                        FROM ACTIVE_APP_LIST 
+                        WHERE IC_VERSION IS NOT NULL
+                        order by IC_VERSION desc) loop
+        
+          for tabs in (select distinct table_name 
+                         from QUERY_IC_CONFIG
+                        where status=1
+                     order by decode( table_name, 'ADAPTER', 0.5, 
+                              'ADAPTER_TRANSFORMER', 0.75,
+                              'CONNECTIVITY', 1, 
+                              'ADDRESS_ROUTE', 2, 
+                              'ADDRESS_TO_TRANSFORMER', 3, 
+                              'MAPPING', 4, 
+                              'CNFG_INSTANCE', 5, 6)) loop
+
+            BEGIN
+              begin
+                SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME = tabs.table_name AND IC_VERSION = cur_sys.IC_VERSION;
+              exception
+                when NO_DATA_FOUND then
+                  SELECT QUERY INTO L_WHAT FROM QUERY_IC_CONFIG WHERE TABLE_NAME = tabs.table_name AND IC_VERSION = 'DEFAULT';
+              end;
+            
+              SELECT REPLACE (L_WHAT,'L_VAR_ID',cur_sys.id) INTO L_WHAT FROM dual;
+              SELECT REPLACE (L_WHAT,'L_VAR_SCHEMA',cur_sys.db_schema) INTO L_WHAT FROM dual;
+              SELECT REPLACE (L_WHAT,'L_VAR_DBLINK',cur_sys.db_link) INTO L_WHAT FROM dual;
+
+              execute immediate L_WHAT;
+              commit;
+              
+            exception
+              when others THEN
+                l_errm := SQLERRM;
+                l_sqlcode := sqlcode;
+                insert into confind_log values(cur_sys.db_schema||'@'||cur_sys.db_link|| ': Error in ' || tabs.table_name || ' - ' || to_char(l_sqlcode) || ' message : ' || l_errm, systimestamp);
+                commit;
+            end;
+          end loop;    
+        end loop;
+    end;
+
+  END;
+  
+  PROCEDURE post_data IS
+   L_WHAT VARCHAR2(4000);
+  BEGIN
+  
+    for tabs in (select distinct table_name 
+                 from QUERY_IC_CONFIG
+                where status=1 and distrib_to_vibe = 1
+             order by decode( table_name, 'ADAPTER', 0.5,
+                                          'ADAPTER_TRANSFORMER', 0.75,
+                                          'CONNECTIVITY', 1, 
+                                          'ADDRESS_ROUTE', 2, 
+                                          'ADDRESS_TO_TRANSFORMER', 3, 
+                                          'MAPPING', 4, 
+                                          'CNFG_INSTANCE', 5, 6) desc) loop
+             
+        execute immediate 'delete from CONFIND_UAT.' || tabs.table_name || '@GS_VIBEPROD' ;
+        
+        execute immediate 'delete from CONFIND_PROD.' || tabs.table_name || '@GS_VIBEPROD' ;
+        
+    end loop;
+    
+    delete from CONFIND_UAT.SYSTEM@GS_VIBEPROD;
+
+    insert into CONFIND_UAT.SYSTEM@GS_VIBEPROD (id, environment, application, db_link, db_schema, db_tns, status, sync_interval, last_update, creation_date, ic_version)  (select id, environment, application, db_link, db_schema, NULL, 1, 24, sample_date, SYSDATE, ic_version from ACTIVE_APP_LIST);
+
+    delete from CONFIND_PROD.SYSTEM@GS_VIBEPROD;
+
+    insert into CONFIND_PROD.SYSTEM@GS_VIBEPROD (id, environment, application, db_link, db_schema, db_tns, status, sync_interval, last_update, creation_date, ic_version)  (select id, environment, application, db_link, db_schema, NULL, 1, 24, sample_date, SYSDATE, ic_version from ACTIVE_APP_LIST);
+    
+    for tabs in (select distinct table_name 
+                 from QUERY_IC_CONFIG
+                where status=1 and distrib_to_vibe = 1
+             order by decode( table_name, 'ADAPTER', 0.5, 
+                                          'ADAPTER_TRANSFORMER', 0.75,
+                                          'CONNECTIVITY', 1, 
+                                          'ADDRESS_ROUTE', 2, 
+                                          'ADDRESS_TO_TRANSFORMER', 3, 
+                                          'MAPPING', 4, 
+                                          'CNFG_INSTANCE', 5, 6) ) loop
+             
+        select  'insert into CONFIND_UAT.' || tabs.table_name || '@GS_VIBEPROD (' ||
+                    listagg (column_name,',') within group(order by column_name ) ||
+                    ') (select ' ||  listagg (column_name,',') within group(order by column_name ) || ' from ' || tabs.table_name || ')'
+        into L_WHAT
+        from    USER_TAB_COLUMNS
+        where  TABLE_NAME = tabs.table_name
+        ORDER  BY COLUMN_ID;
+        
+        execute immediate L_WHAT;
+        
+        select  'insert into CONFIND_PROD.' || tabs.table_name || '@GS_VIBEPROD (' ||
+                    listagg (column_name,',') within group(order by column_name ) ||
+                    ') (select ' ||  listagg (column_name,',') within group(order by column_name ) || ' from ' || tabs.table_name || ')'
+        into L_WHAT
+        from    USER_TAB_COLUMNS
+        where  TABLE_NAME = tabs.table_name
+        ORDER  BY COLUMN_ID;
+        
+        execute immediate L_WHAT;
+    end loop;
+    
+    commit;
+
+  END;
+end CONFIND;
+/
+

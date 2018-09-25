@@ -1,0 +1,23 @@
+CREATE OR REPLACE FORCE VIEW V_CNFG_INSTANCE
+(
+   ID,
+   SYSTEM,
+   TYPE,
+   IC_VERSION,
+   INSTANCE_NAME,
+   BROKER_INTERVAL,
+   TASK_PROCESSOR_COUNT,
+   TASK_INTERVAL,
+   LAST_ALIVE_TIME
+)
+AS
+   SELECT t.instance_id id,
+          t2.db_schema || '@' || t2.db_link SYSTEM,
+          DECODE (t.TYPE,  1, 'SERVER',  2, 'CLIENT',  'UNKNOWN') TYPE,
+          t.version ic_version,
+          t.name instance_name,
+          broker_interval,
+          task_processor_count,
+          task_interval,
+          last_alive_time
+     FROM cnfg_instance t JOIN active_app_list t2 ON (t.SYSTEM = t2.id);

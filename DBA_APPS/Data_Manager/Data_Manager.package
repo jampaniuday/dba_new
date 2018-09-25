@@ -1,0 +1,2071 @@
+create or replace package dba_apps.Data_Manager AUTHID CURRENT_USER AS
+-- The package contains various procedures for managing data rows.
+  
+  C_APP_NAME    CONSTANT VARCHAR2(90) := 'Data_Manager';
+  VERSION       CONSTANT VARCHAR2(30) := '2.9'; 
+  
+  C_DEFAULT_NO_CHUNK         CONSTANT NUMBER := 10000000000; 
+  C_DEFAULT_LOGGING_INTERVAL CONSTANT NUMBER := 10;
+  C_DEFAULT_TIME_LIMIT       CONSTANT NUMBER := 10000000;
+  
+  -- version return function
+  function FUNC_VERSION return VARCHAR2;
+
+  -- The function checks if another archice process run on the same table.
+  function Parallel_run_check (P_schema_name             in varchar2,
+                               P_Table_Name       in VARCHAR2)
+                               return NUMBER;
+                               
+  -- The function checks if the table exists.
+  function is_table_exists (P_Table_Name           in varchar2)
+                               return boolean;
+
+  function get_key_value (P_OWNER IN VARCHAR2 DEFAULT USER,
+						  P_key_Name           in varchar2)
+                               return varchar2;
+							   
+  -- The procedure manages deletion rows from tables.
+  procedure Delete_Rows(P_Table_Name           in varchar2,
+                        P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                        P_Condition            in varchar2 default '1=1',
+                        P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                        P_Sleep_Sec            in number   default 0,
+                        P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                        P_Hint                 in varchar2 default 'NO HINT',
+						P_RECREATE_MV_LOG		in varchar2 default 'N',
+						P_DML_ID				in number	default 0);
+                        
+  -- The procedure manages archiving of rows.
+  procedure Archive_Rows(P_Src_Table_Name       in varchar2,
+                         P_Dst_Table_Name       in varchar2,
+                         P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                         P_Condition            in varchar2 default '1=1',
+                         P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                         P_Sleep_Sec            in number   default 0,
+                         P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                         P_Hint                 in varchar2 default 'NO HINT',
+						 P_RECREATE_MV_LOG		in varchar2 default 'N',
+						 P_DML_ID				in number	default 0);
+
+  -- The function returns new TXN_ID.
+  function Get_Txn_ID return number;
+
+  -- The procedure marks row for the transactional archiving.
+  procedure Mark_Row_For_Txn_Archive(P_Client       in varchar2,
+                                     P_Txn_ID       in number,
+                                     P_Order_In_Txn in number,
+                                     P_Source_Table in varchar2,
+                                     P_Target_Table in varchar2,
+                                     P_PK_Column    in varchar2,
+                                     P_PK_Value     in number,
+                                     P_Data_Date    in date);
+
+  -- The procedure executes the transactional archiving.
+  procedure Txn_Archive(P_Client               in varchar2,
+                        P_Threads              in number   default 1,
+                        P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                        P_Sleep_Sec            in number   default 0,
+                        P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                        P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                        P_Stop_At_Finish       in number   default 1);
+
+  -- The procedure updates records for unfinished threads (for cases of crushes).
+  procedure Stop_Txn_Archive_Threads(P_Client        in varchar2,
+                                     P_Thread_Number in number default -1);
+
+  -- The procedure manages the threads for txn archive.
+  procedure Txn_Archive_Thread(P_Client            in varchar2,
+                               P_Thread_Number     in number,
+                               P_Number_Of_Threads in number,
+                               P_Thread_ID         in varchar2,
+                               P_Time_Limit_Min    in number,
+                               P_Sleep_Sec         in number,
+                               P_Chunk_Size        in number,
+                               P_Stop_At_Finish    in number);
+                               
+    PROCEDURE ARCHIVE_DATA_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER);
+    
+    PROCEDURE DELETE_DATA_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER);
+
+    PROCEDURE ARCHIVE_AND_DELETE_DATA(P_OWNER IN VARCHAR2 DEFAULT USER);
+	
+	PROCEDURE STOP_ARCHIVE_JOB(P_OWNER  IN VARCHAR2 DEFAULT USER,
+							   P_OPTION IN VARCHAR2 DEFAULT 'abort');
+							   
+    PROCEDURE write_dm_log     (P_ID		    	NUMBER,
+								P_BUCKET_ID		    NUMBER,
+								p_schema_name		VARCHAR2,
+								p_operation_time    timestamp,
+                                p_component         VARCHAR2,
+								p_operation    		VARCHAR2,
+                                p_src_table_name    VARCHAR2,
+								p_dst_table_name    VARCHAR2,
+                                p_BUCKET_SIZE       NUMBER,
+                                p_ROWS_PER_MINUTE   VARCHAR2,
+                                p_total_time_ms     NUMBER,
+                                p_size_mb           NUMBER,
+                                p_fields_number     NUMBER,
+                                p_indexes_number    NUMBER);
+
+end Data_Manager;
+/
+
+
+
+
+CREATE OR REPLACE package body DBA_APPS.Data_Manager as
+
+  v_errm          varchar2(200);
+  
+   v_module_name       VARCHAR2 (100) := 'Data_Manager';
+   success             NUMBER := 0;
+   unknown_error       NUMBER := 2100;
+   internal_error      EXCEPTION;
+   interrupt_error     EXCEPTION;
+   schema_name         VARCHAR2(30);
+   
+    FUNCTION FUNC_VERSION return VARCHAR2
+    is
+    begin
+    return VERSION;
+    end FUNC_VERSION;
+    
+  PROCEDURE Drop_MV_Log(P_Src_Table_Name       in varchar2,
+                         p_mview_log_sql       out varchar2) is
+  begin
+       begin
+           SELECT DBMS_METADATA.get_dependent_ddl ('MATERIALIZED_VIEW_LOG',
+                                                   P_Src_Table_Name,
+                                                   user)
+            into p_mview_log_sql
+            from dual;
+        exception
+          when others then
+            p_mview_log_sql := null;
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR - Src Table does not have MATERIALIZED_VIEW_LOG.' , NULL, Log_Manager.Msg_Type_Error);
+        end;
+        
+        begin
+            execute immediate 'drop MATERIALIZED VIEW LOG ON ' || P_Src_Table_Name ;
+        exception
+          when others then
+            p_mview_log_sql := null;
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR dropping MATERIALIZED_VIEW_LOG.' , NULL, Log_Manager.Msg_Type_Error);
+        end;
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name || ' => Dropped MV log.', NULL, Log_Manager.Msg_Type_Info);
+  end Drop_MV_Log;
+
+  PROCEDURE Recreate_MV_Log(P_Src_Table_Name       in varchar2,
+                            p_mview_log_sql        in varchar2) is
+  begin
+    execute immediate p_mview_log_sql ;
+    
+    FOR curr
+    IN (select name 
+        from user_dependencies
+        where referenced_owner = user
+        and referenced_name = P_Src_Table_Name
+        and type = 'MATERIALIZED VIEW') LOOP
+        
+        begin
+          execute immediate 'begin DBMS_SNAPSHOT.REFRESH( ''' || curr.name || ''', ''C''); end;' ;
+        exception
+          when others then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR refreshing MATERIALIZED_VIEW ' || curr.name || '.' , NULL, Log_Manager.Msg_Type_Error);
+        end;
+         
+    END LOOP;
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name || ' => Recreated MV log.', NULL, Log_Manager.Msg_Type_Info);
+  exception
+    when others then
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR recreating MATERIALIZED_VIEW_LOG.' , NULL, Log_Manager.Msg_Type_Error);
+  end Recreate_MV_Log;
+  
+  procedure Delete_Rows(P_Table_Name           in varchar2,
+                        P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                        P_Condition            in varchar2 default '1=1',
+                        P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                        P_Sleep_Sec            in number   default 0,
+                        P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                        P_Hint                 in varchar2 default 'NO HINT',
+                        P_RECREATE_MV_LOG        in varchar2 default 'N',
+                        P_DML_ID                in number    default 0) is
+    
+    C_APP_NAME              CONSTANT VARCHAR2(200) := 'Data_Manager.Delete_Rows'||' ['||Sys_Context('USERENV','SID')||']';
+    C_START_TIME            CONSTANT DATE          := SYSDATE;
+    
+    Last_Logging_Time       date                  := C_START_TIME;
+    Deleted_Rows            number                := 0;
+    Total_Deleted_Rows      number                := 0;
+    Deleted_Rows_Per_Minute number                := 0;     
+    schema_name             VARCHAR2(30);
+    v_check                 NUMBER(1);
+    l_mview_log_sql            VARCHAR2(32000) := null;
+    
+    v_component                 VARCHAR2 (100) := 'Delete_Rows';
+    v_operation                 VARCHAR2 (100);
+    total_run_timestamp_start   TIMESTAMP := SYSTIMESTAMP;
+    run_timestamp_start         TIMESTAMP;
+    run_timestamp_duration_ms   NUMBER;
+    l_size_mb                   NUMBER;
+    l_fields_number             NUMBER;
+    l_indexes_number            NUMBER;
+    
+  BEGIN
+  
+
+    --- dbms_appliction_info mark block
+
+    SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') 
+    INTO schema_name
+    FROM DUAL; 
+    
+   
+--    v_check := Parallel_run_check(schema_name,P_Table_Name);
+--    IF v_check = 1 THEN
+--        raise_application_error(-20105,'Archive for '||schema_name||'.'||P_Table_Name||' already running');   
+--    END IF;
+    
+    dbms_application_info.set_client_info(schema_name||P_Table_Name);
+    DBMS_APPLICATION_INFO.SET_MODULE ('Data_Manager.Delete_Rows '||schema_name|| '.'||P_Table_Name, 'Deleting'  ); 
+    
+    
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_Start || ' => ' || P_Table_Name , NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'PARAMETERS - Table(' || P_Table_Name || ') Where(' || P_Condition || ') Time Limit Min(' || P_Time_Limit_Min || ') Chunk(' || P_Chunk_Size || ') Sleep Sec(' || P_Sleep_Sec || ') Logging Interval Min(' || P_Logging_Interval_Min || ') Hint(' || P_Hint || ')', null, Log_Manager.Msg_Type_Info); 
+
+    if not is_table_exists(P_Table_Name) then
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name||' ERROR - Table does not exist.' , NULL, Log_Manager.Msg_Type_Error);
+        raise_application_error(-20205,P_Table_Name||' ERROR - Table does not exist.'); 
+    end if;
+    
+    if P_RECREATE_MV_LOG = 'Y' then
+        Drop_MV_Log(P_Table_Name, l_mview_log_sql);
+    end if;
+    
+     SELECT SUM (bytes / 1024 / 1024)
+       INTO l_size_mb
+       FROM user_segments
+      WHERE     segment_name = P_Table_Name;
+
+    SELECT COUNT (1)
+      INTO l_fields_number
+      FROM user_tab_columns
+     WHERE table_name = P_Table_Name;
+
+    SELECT COUNT (1)
+      INTO l_indexes_number
+      FROM user_indexes
+     WHERE table_name = P_Table_Name;
+    
+    loop
+      run_timestamp_start := SYSTIMESTAMP;
+      execute immediate 'delete /*+ ' || P_Hint || ' */ ' || P_Table_Name || ' where ' || P_Condition || ' and rownum <= '|| P_Chunk_Size;
+      
+      -- Exit when no rows were deleted by the DELETE above.
+      exit when not(SQL%FOUND);
+      
+      -- Storing the number of rows that were deleted by the last DELETE ("commit" resets the SQL%ROWCOUNT). 
+      Deleted_Rows := SQL%ROWCOUNT;
+        
+      commit;
+      
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+      write_dm_log (
+            P_DML_ID,
+            DATA_MANAGER_LOG_SEQ.nextval,
+            schema_name,
+            run_timestamp_start,
+            v_component,
+            'TOTAL BUCKET',
+            P_Table_Name,
+            null,
+            Deleted_Rows,
+            Deleted_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+
+      -- Calculating the total number of deleted rows and the rate of deleted rows per minute.
+      Total_Deleted_Rows := Total_Deleted_Rows + Deleted_Rows;
+      Deleted_Rows_Per_Minute := Round(Total_Deleted_Rows / (((SYSDATE - C_START_TIME)*24*60)+0.000001));
+
+      -- Exiting the loop if no chunk size were specified (all the wanted rows were deleted by one DELETE execution).
+      if (P_Chunk_Size = C_DEFAULT_NO_CHUNK) then
+        exit;
+      end if;
+
+      -- Checking if timeout occurred.      
+      if (C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE) then
+         Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name ||' TIMEOUT - ' || Total_Deleted_Rows || ' rows were deleted [' || Deleted_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Warning);
+         exit;
+      end if;
+
+      -- Logging if needed.
+      if (Last_Logging_Time + P_Logging_Interval_Min/24/60 < SYSDATE) then
+         Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name||' IN PROGRESS - ' || Total_Deleted_Rows || ' rows were deleted so far [' || Deleted_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+         Last_Logging_Time := SYSDATE;
+      end if;
+
+      -- Sleeping if needed.
+      if P_Sleep_Sec > 0 then
+        DBMS_Lock.Sleep(P_Sleep_Sec);
+      end if;
+
+    end loop;
+
+    -- Releasing shared lock on the table.
+    commit;
+    
+    if l_mview_log_sql is not null then
+        Recreate_MV_Log(P_Table_Name, l_mview_log_sql);
+    end if;
+    
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name||' COMPLETED - ' || Total_Deleted_Rows || ' rows were deleted [' || Deleted_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End || ' => ' || P_Table_Name, NULL, Log_Manager.Msg_Type_Info);
+    
+    run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (total_run_timestamp_start);
+      
+    write_dm_log (
+            P_DML_ID,
+            null,
+            schema_name,
+            total_run_timestamp_start,
+            v_component,
+            'TOTAL DELETE',
+            P_Table_Name,
+            null,
+            Total_Deleted_Rows,
+            Total_Deleted_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+         
+    DBMS_APPLICATION_INFO.SET_MODULE (NULL,NULL);
+    dbms_application_info.set_client_info(NULL);
+    
+  exception
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name||' ERROR - ' || v_errm, NULL, Log_Manager.Msg_Type_Error);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Table_Name||' ERROR - ' || Total_Deleted_Rows || ' rows were deleted [' || Deleted_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+      
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (total_run_timestamp_start);
+      write_dm_log (
+            P_DML_ID,
+            null,
+            schema_name,
+            total_run_timestamp_start,
+            v_component,
+            'FAILED',
+            P_Table_Name,
+            null,
+            Total_Deleted_Rows,
+            Total_Deleted_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+      
+      if l_mview_log_sql is not null then
+        Recreate_MV_Log(P_Table_Name, l_mview_log_sql);
+      end if;
+      
+      DBMS_APPLICATION_INFO.SET_MODULE (NULL,NULL);
+      dbms_application_info.set_client_info(NULL);
+      
+--      RAISE;
+  end Delete_Rows;
+
+
+  function is_table_exists (P_Table_Name           in varchar2)
+                               return boolean
+  IS
+    l_num_tmp                NUMBER(1);
+  BEGIN
+    select 1
+      into l_num_tmp
+      from user_tables
+     where table_name = upper(P_Table_Name);
+     
+     return true;
+  EXCEPTION
+    WHEN OTHERS THEN
+       return false;
+  END;
+
+
+  function get_key_value (P_OWNER IN VARCHAR2 DEFAULT USER,
+                          P_key_Name           in varchar2)
+                               return varchar2
+  IS
+    l_key_value               archive_configuration.KEY_VALUE%type;
+  BEGIN
+    select key_value
+      into l_key_value
+      from archive_configuration
+     where upper(schema) = upper(P_OWNER)
+       and upper(key_Name) = upper(P_key_Name);
+     
+     return l_key_value;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        BEGIN
+            select key_value
+              into l_key_value
+              from archive_configuration
+             where schema = 'PUBLIC'
+               and upper(key_Name) = upper(P_key_Name);
+             
+             return l_key_value;
+        EXCEPTION
+            WHEN OTHERS THEN
+               return null;
+        END;
+    WHEN OTHERS THEN
+       return null;
+  END get_key_value;
+  
+  
+  FUNCTION Parallel_run_check (P_schema_name           in varchar2,
+                               P_Table_Name            in VARCHAR2)
+                               return NUMBER IS p_result NUMBER(1);
+                               
+                               P_combined NUMBER(2);
+  BEGIN
+  
+  SELECT COUNT(1)
+  INTO  P_combined
+  FROM v$session 
+  WHERE client_info = P_schema_name||P_Table_Name;
+  
+  
+  IF P_combined = 0 THEN
+   
+  p_result  := 0;  
+
+  ELSE
+      
+  p_result  := 1; 
+  
+  END IF;
+  
+  RETURN p_result;
+  END Parallel_run_check;
+   
+
+
+
+
+  PROCEDURE Archive_Rows(P_Src_Table_Name       in varchar2,
+                         P_Dst_Table_Name       in varchar2,
+                         P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                         P_Condition            in varchar2 default '1=1',
+                         P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                         P_Sleep_Sec            in number   default 0,
+                         P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                         P_Hint                 in varchar2 default 'NO HINT',
+                         P_RECREATE_MV_LOG        in varchar2 default 'N',
+                         P_DML_ID                in number    default 0) is
+    
+    C_APP_NAME      CONSTANT VARCHAR2(200) := 'Data_Manager.Archive_Rows'||' ['||Sys_Context('USERENV','SID')||']';
+    C_START_TIME    CONSTANT DATE         := SYSDATE;
+    
+    PK_Columns_Table       DBMS_Utility.LName_Array;
+    Number_Of_PK_Columns   binary_integer;
+    PK_Columns_String      varchar2(4000);
+    
+    Columns_Table          DBMS_Utility.LName_Array;
+    Number_Of_Columns      binary_integer;
+    Columns_String         varchar2(4000);
+    
+    Last_Logging_Time        date   := C_START_TIME;
+    Archived_Rows            number := 0;
+    Total_Archived_Rows      number := 0;
+    Archived_Rows_Per_Minute number := 0;
+    Temp_Table_Seq           number;
+    Temp_Table_Name          varchar2(30);
+    schema_name             VARCHAR2(30);
+    v_check                 NUMBER(1);
+    l_mview_log_sql            VARCHAR2(32000) := null;
+    
+    v_component                 VARCHAR2 (100) := 'Archive_Rows';
+    v_operation                 VARCHAR2 (100);
+    total_run_timestamp_start   TIMESTAMP := SYSTIMESTAMP;
+    total_bucket_run_start       TIMESTAMP := SYSTIMESTAMP;
+    run_timestamp_start         TIMESTAMP;
+    run_timestamp_duration_ms   NUMBER;
+    l_bucket_id                    NUMBER;
+    l_size_mb                   NUMBER;
+    l_fields_number             NUMBER;
+    l_indexes_number            NUMBER;
+  begin
+
+    --- dbms_appliction_info mark block
+
+    SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') 
+    INTO schema_name
+    FROM DUAL; 
+
+--    v_check := Parallel_run_check(schema_name,P_Src_Table_Name);
+--    IF v_check = 1 THEN
+--      raise_application_error(-20105,'Archive for '||schema_name||'.'||P_Src_Table_Name||' already running');
+--    END IF;
+
+
+    dbms_application_info.set_client_info(schema_name||P_Src_Table_Name);
+    DBMS_APPLICATION_INFO.SET_MODULE ('Data_Manager.Archive_Rows '||schema_name ||'.'||P_Src_Table_Name, 'Creating comma separated text tables'  ); 
+    
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_Start || ' => ' || P_Src_Table_Name, NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'PARAMETERS - Source Table(' || P_Src_Table_Name || ') Dest Table(' || P_Dst_Table_Name || ') Where(' || P_Condition || ') Time Limit Min(' || P_Time_Limit_Min || ') Chunk(' || P_Chunk_Size || ') Sleep Sec(' || P_Sleep_Sec || ') Logging Interval Min(' || P_Logging_Interval_Min || ') Hint(' || P_Hint || ')', null, Log_Manager.Msg_Type_Info); 
+    
+
+    if not is_table_exists(P_Src_Table_Name) then
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR - Src Table does not exist.' , NULL, Log_Manager.Msg_Type_Error);
+        raise_application_error(-20206,P_Src_Table_Name||' ERROR - Src Table does not exist.'); 
+    end if;
+
+    if not is_table_exists(P_Dst_Table_Name) then
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Dst_Table_Name||' ERROR - Dst Table does not exist.' , NULL, Log_Manager.Msg_Type_Error);
+        raise_application_error(-20207,P_Dst_Table_Name||' ERROR - Dst Table does not exist.'); 
+    end if;
+
+     SELECT SUM (bytes / 1024 / 1024)
+       INTO l_size_mb
+       FROM user_segments
+      WHERE     segment_name = P_Src_Table_Name;
+
+    SELECT COUNT (1)
+      INTO l_fields_number
+      FROM user_tab_columns
+     WHERE table_name = P_Src_Table_Name;
+
+    SELECT COUNT (1)
+      INTO l_indexes_number
+      FROM user_indexes
+     WHERE table_name = P_Src_Table_Name;
+    
+    -- Getting the PK columns of the source table.
+    select COLUMN_NAME 
+    bulk collect into PK_Columns_Table
+    from   USER_CONSTRAINTS  CONS,
+           USER_CONS_COLUMNS COLS
+    where  CONS.CONSTRAINT_NAME = COLS.CONSTRAINT_NAME
+      and  CONS.OWNER           = COLS.OWNER
+      and  CONS.TABLE_NAME      = COLS.TABLE_NAME
+      and  CONS.CONSTRAINT_TYPE = 'P'
+      and  CONS.STATUS          = 'ENABLED'
+      and  CONS.TABLE_NAME      = P_Src_Table_Name
+      and  CONS.INVALID         is NULL
+    order by POSITION asc;
+    
+    
+        -- Creating comma separated text of the PK columns of the source table. 
+    DBMS_Utility.Table_To_Comma(PK_Columns_table,
+                                Number_Of_PK_Columns,
+                                PK_Columns_String);
+                                
+    if nvl(length(replace(PK_Columns_String, ',', '')),0) < 1 then
+       Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR - Src Table does not have PK.' , NULL, Log_Manager.Msg_Type_Error);
+       raise_application_error(-20208,P_Src_Table_Name||' ERROR - Src Table does not have PK.'); 
+    end if;
+
+    if P_RECREATE_MV_LOG = 'Y' then
+        Drop_MV_Log(P_Src_Table_Name, l_mview_log_sql);
+    end if;
+    
+    -- Getting all the columns of source table.
+    select COLUMN_NAME 
+    bulk collect into Columns_Table
+    from   USER_TAB_COLUMNS
+    where  TABLE_NAME = P_Src_Table_Name;
+    
+    -- Creating comma separated text of all the columns of the source table.
+    DBMS_Utility.Table_To_Comma(Columns_table,
+                                Number_Of_Columns,
+                                Columns_String);
+                                
+    dbms_application_info.set_action('Droppin old Global temp table');    
+    BEGIN
+      FOR curr IN (
+        select 'drop table '||object_name cmd
+        from user_objects
+        where object_type = 'TABLE'
+          and object_name like 'DATA_MANAGER_TEMP_%'
+          and created < sysdate-7
+        )
+      LOOP
+         execute immediate (curr.cmd);
+      END LOOP;
+    EXCEPTION
+      WHEN OTHERS THEN
+      null;
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||' ERROR - could not drop DATA_MANAGER_TEMP tables. ' || SQLERRM , NULL, Log_Manager.Msg_Type_Error);  
+    END;
+
+    dbms_application_info.set_action('Creating Global temp table');    
+    -- Setting a name for the temp table that is storing PK values.
+    select DATA_MANAGER_ARCH_TABLE_SEQ.nextval
+    into   Temp_Table_Seq
+    from   DUAL;
+
+    Temp_Table_Name := 'DATA_MANAGER_TEMP_' || Temp_Table_Seq;
+
+    
+    -- Creating temp table for storing the PK values.
+    execute immediate 'create global temporary table ' || Temp_Table_Name || ' on commit delete rows as select ' || PK_Columns_String || ' from ' || P_Src_Table_Name || ' where ROWNUM < 1';
+
+
+    loop
+    
+      SELECT DATA_MANAGER_LOG_SEQ.nextval
+      INTO l_bucket_id
+      FROM DUAL; 
+    
+      total_bucket_run_start := SYSTIMESTAMP;
+      run_timestamp_start := SYSTIMESTAMP;
+      
+      -- Storing the PK values of the rows that are going to be archived.
+      dbms_application_info.set_action('Find candidates');
+      execute immediate 'insert /* append */ into ' || Temp_Table_Name || '(' || PK_Columns_String || ') '|| 
+                        'select /*+ ' || P_Hint || ' */ ' || PK_Columns_String ||
+                       ' from ' || P_Src_Table_Name ||
+                       ' where '|| P_Condition || ' and ROWNUM <= ' || P_Chunk_Size;
+
+      -- Exiting if there are no more rows to archive. 
+      Archived_Rows := SQL%ROWCOUNT;
+      if Archived_Rows = 0 then    
+        exit;
+      end if;
+
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+      write_dm_log (
+            P_DML_ID,
+            l_bucket_id,
+            schema_name,
+            run_timestamp_start,
+            v_component,
+            'SELECT',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Archived_Rows,
+            Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+           
+
+      run_timestamp_start := SYSTIMESTAMP;
+      
+      -- Inserting the rows into the destination table.
+      dbms_application_info.set_action('Inserting'); 
+      execute immediate 'insert into ' || P_Dst_Table_Name || '(' || Columns_String || ') select ' || Columns_String ||
+                        ' from ' || P_Src_Table_Name || ' where (' || PK_Columns_String || ') in (select ' || PK_Columns_String ||
+                        ' from ' || Temp_Table_Name ||')';
+                        
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+      write_dm_log (
+            P_DML_ID,
+            l_bucket_id,
+            schema_name,
+            run_timestamp_start,
+            v_component,
+            'INSERT',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Archived_Rows,
+            Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+         
+         
+      run_timestamp_start := SYSTIMESTAMP;
+      
+      -- Deleting the rows from the source table.
+      dbms_application_info.set_action('Deleting'); 
+      execute immediate 'delete ' || P_Src_Table_Name || ' where (' || PK_Columns_String || ') in (select ' || PK_Columns_String ||
+                        ' from ' || Temp_Table_Name ||')';
+      
+      -- Storing the number of rows that were archived by the last INSERT-DELETE ("commit" resets the SQL%ROWCOUNT). 
+      Archived_Rows := SQL%ROWCOUNT;
+      
+      commit;
+      
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+      write_dm_log (
+            P_DML_ID,
+            l_bucket_id,
+            schema_name,
+            run_timestamp_start,
+            v_component,
+            'DELETE',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Archived_Rows,
+            Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+         
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (total_bucket_run_start);
+      
+      write_dm_log (
+            P_DML_ID,
+            l_bucket_id,
+            schema_name,
+            total_bucket_run_start,
+            v_component,
+            'TOTAL BUCKET',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Archived_Rows,
+            Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+      
+      dbms_application_info.set_action('Post insert\delete action'); 
+      -- Calculating the total number of archived rows and the rate of archived rows per minute.
+      Total_Archived_Rows := Total_Archived_Rows + Archived_Rows;
+      Archived_Rows_Per_Minute := Round(Total_Archived_Rows / (((SYSDATE - C_START_TIME)*24*60)+0.000001));
+
+      -- Exiting the loop if no chunk size were specified (all the wanted rows were archived by one INSERT-DELETE execution).
+      if (P_Chunk_Size = C_DEFAULT_NO_CHUNK) then
+        exit;
+      end if;
+
+      -- Checking if time-out occurred. 
+      if (C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE) then
+         Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||'-->'||P_Dst_Table_Name ||' TIMEOUT - ' || Total_Archived_Rows || ' rows were archived [' || Archived_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Warning);
+         exit;
+      end if;
+
+      -- Logging if needed.
+      if (Last_Logging_Time + P_Logging_Interval_Min/24/60 < SYSDATE) then
+         Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||'-->'||P_Dst_Table_Name ||' IN PROGRESS - ' || Total_Archived_Rows || ' rows were archived so far [' || Archived_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+         Last_Logging_Time := SYSDATE;
+      end if;
+      
+      -- Sleeping if needed.
+      if P_Sleep_Sec > 0 then
+        DBMS_Lock.Sleep(P_Sleep_Sec);
+      end if;
+    end loop;
+    
+    run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (total_run_timestamp_start);
+      
+    write_dm_log (
+            P_DML_ID,
+            null,
+            schema_name,
+            total_run_timestamp_start,
+            v_component,
+            'TOTAL ARCHIVE',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Total_Archived_Rows,
+            Total_Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+
+         
+    -- Dropping the temporary table of the PK values.
+    execute immediate 'drop table ' || Temp_Table_Name;
+
+  
+    if l_mview_log_sql is not null then
+        Recreate_MV_Log(P_Src_Table_Name, l_mview_log_sql);
+    end if;
+    
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||'-->'||P_Dst_Table_Name ||' COMPLETED - ' || Total_Archived_Rows || ' rows were archived [' || Archived_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End || ' => ' || P_Src_Table_Name, NULL, Log_Manager.Msg_Type_Info);
+    
+    DBMS_APPLICATION_INFO.SET_MODULE (NULL,NULL);
+    dbms_application_info.set_client_info(NULL);
+    
+  EXCEPTION
+    when OTHERS then
+      rollback;
+      begin
+        execute immediate 'drop table ' || Temp_Table_Name;
+      exception
+        when OTHERS then
+          NULL;
+      end;
+      
+      if l_mview_log_sql is not null then
+        Recreate_MV_Log(P_Src_Table_Name, l_mview_log_sql);
+      end if;
+      
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||'-->'||P_Dst_Table_Name ||' ERROR - ' || v_errm, null, Log_Manager.Msg_Type_Error);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Src_Table_Name||'-->'||P_Dst_Table_Name ||' ERROR - ' || Total_Archived_Rows || ' rows were archived [' || Archived_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+      
+      run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (total_run_timestamp_start);
+      write_dm_log (
+            P_DML_ID,
+            null,
+            schema_name,
+            total_run_timestamp_start,
+            v_component,
+            'FAILED',
+            P_Src_Table_Name,
+            P_Dst_Table_Name,
+            Total_Archived_Rows,
+            Total_Archived_Rows/((run_timestamp_duration_ms+1)/(1000*60)),
+            run_timestamp_duration_ms,
+            l_size_mb,
+            l_fields_number,
+            l_indexes_number
+         );
+         
+      DBMS_APPLICATION_INFO.SET_MODULE (NULL,NULL);
+      dbms_application_info.set_client_info(NULL);
+      
+--      RAISE;
+  end Archive_Rows;
+
+
+
+  function Get_Txn_ID return number is
+    Return_Value number;
+  begin
+    select DATA_MANAGER_TXN_ID_SEQ.Nextval
+    into   Return_Value
+    from   DUAL;
+
+    return Return_Value;
+  exception
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, null, Log_Manager.Msg_Type_Error);
+  end Get_Txn_ID;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Mark_Row_For_Txn_Archive(P_Client                 in varchar2,
+                                     P_Txn_ID                 in number,
+                                     P_Order_In_Txn           in number,
+                                     P_Source_Table           in varchar2,
+                                     P_Target_Table           in varchar2,
+                                     P_PK_Column              in varchar2,
+                                     P_PK_Value               in number,
+                                     P_Data_Date              in date) is
+  begin
+    insert into DATA_MANAGER_ROWS_TO_ARCHIVE(ROW_ID,
+                                             CLIENT,
+                                             TXN_ID,
+                                             ORDER_IN_TXN,
+                                             SOURCE_TABLE_NAME,
+                                             TARGET_TABLE_NAME,
+                                             PK_COLUMN,
+                                             PK_VALUE,
+                                             DATA_DATE,
+                                             THREAD)
+    values (DATA_MANAGER_ROW_ID_SEQ.Nextval,
+            P_Client,
+            P_Txn_ID,
+            P_Order_In_Txn,
+            P_Source_Table,
+            P_Target_Table,
+            P_PK_Column,
+            P_PK_Value,
+            P_Data_Date,
+            Mod(P_Txn_ID, 64) + 1);
+  end Mark_Row_For_Txn_Archive;
+
+
+
+
+
+
+
+
+
+
+  procedure Txn_Archive(P_Client               in varchar2,
+                        P_Threads              in number   default 1,
+                        P_Time_Limit_Min       in number   default C_DEFAULT_TIME_LIMIT,
+                        P_Sleep_Sec            in number   default 0,
+                        P_Chunk_Size           in number   default C_DEFAULT_NO_CHUNK,
+                        P_Logging_Interval_Min in number   default C_DEFAULT_LOGGING_INTERVAL,
+                        P_Stop_At_Finish       in number   default 1) is
+    C_APP_NAME            CONSTANT VARCHAR2(200) := 'Data_Manager.Txn_Archive';
+    C_CHECK_INTERVAL_SECS CONSTANT NUMBER       := 30;
+    C_START_TIME          CONSTANT DATE         := SYSDATE;
+
+    Is_Running               number(1);
+    Already_Running          exception;
+    Wrong_Threads_Number     exception;
+    Thread_ID                number;
+    Is_Run_Over              number(1);
+    Total_Archived_Rows      number;
+    Archived_Rows_Per_Minute number := 0;
+    Left_Unarchived_Rows     number;
+    Is_Thread_Aborted        number := 0;
+    Last_Logging_Time        date := C_START_TIME;
+  begin
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_Start, null, Log_Manager.Msg_Type_Info);
+
+
+
+
+
+
+    -- ====================== Start Checks ============================
+
+    -- Checking that no archiving is currently running for the same client.
+    select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+           Nvl(Count(*), 0)
+    into   Is_Running
+    from   DATA_MANAGER_TXN_ARCH_THREADS
+    where  CLIENT = P_Client
+      and  IS_CLOSED = 0
+      and  ROWNUM < 2;
+
+    if Is_Running = 1 then
+      raise Already_Running;
+    end if;
+
+    -- Checking that number of threads is valid (1, 2, 4, 8, 16, 32 ,64).
+    if (P_Threads <> 1) and (P_Threads <> 2) and (P_Threads <> 4) and (P_Threads <> 8) and (P_Threads <> 16) and (P_Threads <> 32) and (P_Threads <> 64)then
+       raise Wrong_Threads_Number;
+    end if;
+
+    -- ================================================================
+
+
+
+
+
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'PARAMETERS - Client(' || P_Client || ') Threads(' || P_Threads || ') Time Limit Min(' || P_Time_Limit_Min || ') Sleep Sec(' || P_Sleep_Sec || ') Chunk(' || P_Chunk_Size || ') Logging Interval Min(' || P_Logging_Interval_Min || ') Stop At Finish(' || P_Stop_At_Finish || ')', null, Log_Manager.Msg_Type_Info);
+
+
+
+
+
+    -- Starting the threads
+    for Thread_Number in 1..P_Threads loop
+      select DATA_MANAGER_THREAD_ID_SEQ.nextval
+      into   Thread_ID
+      from   DUAL;
+
+      insert into DATA_MANAGER_TXN_ARCH_THREADS (THREAD_NUMBER,
+                                                 THREAD_ID,
+                                                 CLIENT,
+                                                 SLEEP_SEC,
+                                                 TIME_LIMIT_MIN,
+                                                 CHUNK_SIZE,
+                                                 IS_STOP_AT_FINISH)
+      values (Thread_Number,
+              Thread_ID,
+              P_Client,
+              P_Sleep_Sec,
+              P_Time_Limit_Min,
+              P_Chunk_Size,
+              P_Stop_At_Finish);
+
+      DBMS_Scheduler.Create_Job(JOB_NAME   => 'Data_Manager_Thread_' || Thread_ID,
+                                JOB_TYPE   => 'PLSQL_BLOCK',
+                                JOB_ACTION => 'begin Data_Manager.Txn_Archive_Thread(P_Client=>'''||P_Client||''',P_Thread_Number=>'||Thread_Number||',P_Thread_ID=>'||Thread_ID||',P_Number_Of_Threads=>'||P_Threads||',P_Time_Limit_Min=>'||P_Time_Limit_Min||',P_Sleep_Sec=>'||P_Sleep_Sec||',P_Chunk_Size=>'||P_Chunk_Size||',P_Stop_At_Finish=>'||P_Stop_At_Finish||'); end;',
+                                ENABLED    => TRUE);
+
+      commit;
+    end loop;
+
+
+
+
+    -- Waiting for threads to stop.
+    loop
+      DBMS_Lock.Sleep(C_CHECK_INTERVAL_SECS);
+
+      -- Checking if all the threads are stopped. 
+      begin
+        select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+               0
+        into   Is_Run_Over
+        from   DATA_MANAGER_TXN_ARCH_THREADS
+        where  CLIENT        = P_Client
+          and  IS_TERMINATED = 0
+          and  IS_FINISHED   = 0
+          and  IS_ERROR      = 0
+          and  ROWNUM < 2;
+      exception
+        when NO_DATA_FOUND then
+          Is_Run_Over := 1;
+      end;
+
+      -- All the threads are finished running.
+      if Is_Run_Over = 1 then
+        
+        -- Counting the total number of archived rows for all the threads and checks if there was a time-out, termination or abort of the threads.
+        select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+               Sum(ARCHIVED_ROWS),
+               Nvl(Sum(IS_TIMED_OUT), 0) + Nvl(Sum(IS_TERMINATED), 0) + Nvl(Sum(IS_ERROR), 0)
+        into   Total_Archived_Rows,
+               Is_Thread_Aborted
+        from   DATA_MANAGER_TXN_ARCH_THREADS
+        where  CLIENT    = P_Client
+          and  IS_CLOSED = 0;
+
+        Archived_Rows_Per_Minute := Round(Total_Archived_Rows / (((SYSDATE - C_START_TIME)*24*60)+0.000001));
+
+        -- Counting the number of unarchived rows (left because of timeout/error or rows that left because of error in their archive process).
+        select /*+ index(DATA_MANAGER_ROWS_TO_ARCHIVE DATA_MANAGER_RTA_IDX1) */
+               Count(*) UNARCHIVED_ROWS
+        into   Left_Unarchived_Rows
+        from   DATA_MANAGER_ROWS_TO_ARCHIVE
+        where  CLIENT       = P_Client
+          and  THREAD >= 0
+          and  IS_PROCESSED = 0;
+           
+        if Is_Thread_Aborted = 0 then
+          Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'COMPLETED - ' || Total_Archived_Rows || ' rows were archived [' || Archived_Rows_Per_Minute || ' rows/min] [' || Left_Unarchived_Rows || ' rows left unarchived]', NULL, Log_Manager.Msg_Type_Info);
+        else
+          Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'ABORTED - ' || Total_Archived_Rows || ' rows were archived [' || Archived_Rows_Per_Minute || ' rows/min] [' || Left_Unarchived_Rows || ' rows left unarchived]', NULL, Log_Manager.Msg_Type_Warning);
+        end if;         
+
+        update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+               DATA_MANAGER_TXN_ARCH_THREADS
+        set    IS_CLOSED = 1,
+               END_TIME  = SYSDATE
+        where  CLIENT    = P_Client
+          and  IS_CLOSED = 0;
+
+        commit;
+
+        Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+        exit;
+      end if;
+
+      -- Logging if needed.
+      if (Last_Logging_Time + P_Logging_Interval_Min/24/60 < SYSDATE) then
+
+         -- Counting the total number of archived rows for all the threads.
+         select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+                Sum(ARCHIVED_ROWS)
+         into   Total_Archived_Rows
+         from   DATA_MANAGER_TXN_ARCH_THREADS
+         where  CLIENT    = P_Client
+           and  IS_CLOSED = 0;
+
+         Archived_Rows_Per_Minute := Round(Total_Archived_Rows / (((SYSDATE - C_START_TIME)*24*60)+0.000001));
+
+         Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Client ||' IN PROGRESS - ' || Total_Archived_Rows || ' rows were archived so far [' || Archived_Rows_Per_Minute || ' rows/min]', NULL, Log_Manager.Msg_Type_Info);
+         Last_Logging_Time := SYSDATE;
+      end if;
+    end loop;
+
+  exception
+    when Already_Running then
+      rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Client ||' There is currently running archive for the same client.', NULL, Log_Manager.Msg_Type_Error);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+    when Wrong_Threads_Number then
+      rollback;
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, P_Client ||' Unsupported number of threads was specified.', NULL, Log_Manager.Msg_Type_Error);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, NULL, Log_Manager.Msg_Type_Error);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, Log_Manager.Msg_App_End, NULL, Log_Manager.Msg_Type_Info);
+  end;
+
+  
+
+
+
+
+
+
+
+
+
+
+
+  procedure Stop_Txn_Archive_Threads(P_Client        in varchar2,
+                                     P_Thread_Number in number default -1) is
+    C_APP_NAME CONSTANT VARCHAR2(200) := 'Data_Manager.Txn_Archive';
+  begin
+    Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'The thread ' || P_Thread_Number || ' of ' || P_Client || ' will be terminated after its current txn is finished.', NULL, Log_Manager.Msg_Type_Info);
+
+    update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK_IDX1) */
+           DATA_MANAGER_TXN_ARCH_THREADS
+    set    IS_TERMINATED = 1
+    where  CLIENT = P_Client
+           and (THREAD_NUMBER = P_Thread_Number or P_Thread_Number = -1)
+           and IS_TIMED_OUT   = 0
+           and IS_TERMINATED  = 0
+           and IS_FINISHED    = 0
+           and IS_ERROR       = 0;
+
+    commit;
+  exception
+    when OTHERS then
+      rollback;
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, NULL, Log_Manager.Msg_Type_Error);
+  end;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  procedure Txn_Archive_Thread(P_Client            in varchar2,
+                               P_Thread_Number     in number,
+                               P_Number_Of_Threads in number,
+                               P_Thread_ID         in varchar2,
+                               P_Time_Limit_Min    in number,
+                               P_Sleep_Sec         in number,
+                               P_Chunk_Size        in number,
+                               P_Stop_At_Finish    in number) IS
+    C_APP_NAME                     constant varchar2(200) := 'Data_Manager.Txn_Archive_Thread [ID:'||P_Thread_ID||' / Thread No:'||P_Thread_Number||']';
+    C_THREAD_CHECKS_INTERVAL_SEC   constant number        := 30;   
+    C_START_TIME                   constant date          := SYSDATE;
+    C_SLEEP_WHILE_WAITING_FOR_ROWS constant number        := 30;
+
+    type Stmt is record (TEXT varchar2(10000),
+                         ID   number);
+    type Stmts_Table is table of Stmt;
+    type Columns_Indexed_Table is table of varchar2(10000) index by varchar2(30);
+
+    Columns_Lists          Columns_Indexed_Table;
+    Delete_Stmts           Stmts_Table := Stmts_Table();
+    Archived_Rows_Count    number      := 0;
+    Last_Row_Txn_ID        number      := -1;
+    Last_Thread_Checks     date        := SYSDATE;
+    Last_Commited          number      := 0;
+    Columns_Table          DBMS_Utility.LName_Array;
+    Number_Of_Columns      binary_integer;
+    Columns_String         varchar2(10000);
+    L_Is_Timed_Out         number(1)   := 0;
+    L_Is_Terminated        number(1)   := 0;
+    L_Is_Finished          number(1)   := 0;
+    Are_Rows_Found         number(1)   := 0;
+
+  begin
+    loop
+        -- Getting a chunk of rows
+        for Current_Row in (select /*+ index(DATA_MANAGER_ROWS_TO_ARCHIVE DATA_MANAGER_RTA_IDX1) */
+                                   ROW_ID,
+                                   TXN_ID,
+                                   SOURCE_TABLE_NAME,
+                                   TARGET_TABLE_NAME,
+                                   PK_COLUMN,
+                                   PK_VALUE
+                            from   DATA_MANAGER_ROWS_TO_ARCHIVE
+                            where  CLIENT = P_Client
+                              and  THREAD between (P_Thread_Number - 1) * (64 / P_Number_Of_Threads) + 1
+                                              and P_Thread_Number * (64 / P_Number_Of_Threads)
+                              and  ROWNUM <= P_Chunk_Size
+                            order by CLIENT,
+                                     THREAD,                                                                    
+                                     TXN_ID,
+                                     ORDER_IN_TXN asc) loop
+            begin
+                
+                Are_Rows_Found := 1;
+
+                -- Checking if txn is finished (and not a first/after corrupted txn).
+                if (Last_Row_Txn_ID <> Current_Row.TXN_ID) and (Last_Row_Txn_ID <> -1) then
+
+                    -- Making the DELETE of the rows from source table in reverse order.
+                    for Delete_Stmt in reverse Delete_Stmts.FIRST..Delete_Stmts.LAST loop
+                        execute immediate Delete_Stmts(Delete_Stmt).TEXT
+                        using Delete_Stmts(Delete_Stmt).ID;
+
+                        -- Updating the counter of the archived rows.
+                        Archived_Rows_Count := Archived_Rows_Count + SQL%ROWCOUNT;
+                    end loop;
+
+                    -- Emptying the array of the DELETE stmts.
+                    Delete_Stmts := Stmts_Table();
+
+                    -- Checking if the thread should do logging and checks for time-out/termination.
+                    if SYSDATE >= Last_Thread_Checks + C_THREAD_CHECKS_INTERVAL_SEC/24/60/60 then
+                        
+                        -- Updating the archived rows count in the DATA_MANAGER_TXN_ARCH_THREADS.
+                        update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+                               DATA_MANAGER_TXN_ARCH_THREADS
+                        set    ARCHIVED_ROWS = Archived_Rows_Count
+                        where  THREAD_ID     = P_Thread_ID;
+
+                        -- Checking for time-out
+                        if C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE then
+                        
+                            L_Is_Timed_Out := 1;
+                            L_Is_Finished := 1;
+
+                            -- Commiting and exiting.
+                            commit;
+                            exit;
+                        end if;
+
+                        -- Checking for termination of the thread.
+                        select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+                               IS_TERMINATED
+                        into   L_Is_Terminated
+                        from   DATA_MANAGER_TXN_ARCH_THREADS
+                        where  THREAD_ID  = P_Thread_ID;
+
+                        if L_Is_Terminated = 1 then
+                            L_Is_Finished := 1;
+                            
+                            -- Commiting and exiting.
+                            commit;
+                            exit;
+                        end if;
+
+                        Last_Thread_Checks := SYSDATE;
+                    end if;
+
+                    -- Checking if chunk is exceeded and COMMIT should be executed.
+                    if Archived_Rows_Count > Last_Commited + P_Chunk_Size then                        
+                        
+                        -- Commiting.
+                        commit;
+
+                        -- Sleeping if needed.
+                        if P_Sleep_Sec > 0 then
+                            DBMS_Lock.Sleep(P_Sleep_Sec);
+                        end if;
+                    end if;
+
+                end if;
+
+                -- Getting the columns list of the source table from previously stored lists.
+                begin
+                    Columns_String := Columns_Lists(Current_Row.SOURCE_TABLE_NAME);
+                exception
+                    -- The columns list of this table wasn't stored yet.
+                    when others then
+                        Columns_String := NULL;
+                end;
+
+                -- If the columns list wasn't stored already.
+                if Columns_String is NULL then
+                    
+                    -- Getting the columns of source table.
+                    select COLUMN_NAME
+                    bulk collect into Columns_Table
+                    from   USER_TAB_COLUMNS
+                    where  TABLE_NAME = Current_Row.SOURCE_TABLE_NAME;
+           
+                    DBMS_Utility.Table_To_Comma(Columns_table,
+                                                Number_Of_Columns,
+                                                Columns_String);
+                    
+                    -- Storing the columns list.
+                    Columns_Lists(Current_Row.SOURCE_TABLE_NAME) := Columns_String;
+                end if;
+
+                -- Inserting the current row into the target table.
+                execute immediate 'insert into '||Current_Row.TARGET_TABLE_NAME||' ('||Columns_String||')'||
+                                  ' select '||Columns_String||' from '||Current_Row.SOURCE_TABLE_NAME||
+                                  ' where '||Current_Row.PK_COLUMN||' = :PK_VALUE'
+                using Current_Row.PK_VALUE;
+
+                -- Expanding the array of DELETE stmts if it isn't empty.
+                if Delete_Stmts is not NULL then
+                    Delete_Stmts.EXTEND;
+                end if;
+
+                -- Storing the DELETE stmt for the current row in the array of DELETE stmts.
+                Delete_Stmts(Delete_Stmts.LAST).TEXT := 'delete '||Current_Row.SOURCE_TABLE_NAME||
+                                                       ' where '||Current_Row.PK_COLUMN||' = :PK_VALUE';
+                Delete_Stmts(Delete_Stmts.LAST).ID := Current_Row.PK_VALUE;
+
+                -- Storing current row's TXN_ID as 
+                Last_Row_Txn_ID := Current_Row.TXN_ID;
+
+                -- Marking the row as processed.
+                update /*+ index(DATA_MANAGER_ROWS_TO_ARCHIVE DATA_MANAGER_RTA_IDXPK) */
+                       DATA_MANAGER_ROWS_TO_ARCHIVE
+                set    THREAD       = -1,
+                       IS_PROCESSED = 1,
+                       PROCESS_TIME = SYSDATE
+                where  ROW_ID = Current_Row.ROW_ID;
+
+            exception
+                -- An error happened during a process of the current row.
+                when OTHERS then
+                    v_errm := SUBSTR(SQLERRM, 1 , 200);
+
+                    -- Rolling back all the changes.
+                    rollback;
+
+                    -- Marking the txn as corrupted.
+                    update /*+ index(DATA_MANAGER_ROWS_TO_ARCHIVE DATA_MANAGER_RTA_IDX2) */
+                           DATA_MANAGER_ROWS_TO_ARCHIVE
+                    set    THREAD   = -1,
+                           IS_ERROR = 1
+                    where  TXN_ID = Current_Row.TXN_ID;
+
+                    -- Storing the error.
+                    update /*+ index(DATA_MANAGER_ROWS_TO_ARCHIVE DATA_MANAGER_RTA_IDXPK) */
+                           DATA_MANAGER_ROWS_TO_ARCHIVE
+                    set    ERROR = v_errm
+                    where  ROW_ID = Current_Row.ROW_ID;
+
+                    -- Marking that the last txn was corrupted and exiting from the bulk of rows.
+                    commit;
+                    Last_Row_Txn_ID := -1;
+                    exit;
+            end;
+        end loop;
+
+        -- Exiting if timed-out or terminated.
+        if L_Is_Timed_Out = 1 or L_Is_Terminated = 1 then
+            exit;
+        end if;
+
+        -- If no more rows for archiving is currently found.        
+        if Are_Rows_Found = 0 then
+
+            -- Checking if there are rows that should be finished to be archived.
+            if Last_Row_Txn_ID <> -1 then
+                -- Making the DELETE of the rows from source table in reverse order.
+                for Delete_Stmt in reverse Delete_Stmts.FIRST..Delete_Stmts.LAST loop
+                    execute immediate Delete_Stmts(Delete_Stmt).TEXT
+                    using Delete_Stmts(Delete_Stmt).ID;
+
+                    -- Updating the counter of the archived rows.
+                    Archived_Rows_Count := Archived_Rows_Count + SQL%ROWCOUNT;
+                end loop;
+                   
+                -- Updating the archived rows count in the DATA_MANAGER_TXN_ARCH_THREADS.
+                update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+                       DATA_MANAGER_TXN_ARCH_THREADS
+                set    ARCHIVED_ROWS = Archived_Rows_Count
+                where  THREAD_ID     = P_Thread_ID;
+          
+                -- Commiting.
+                commit;
+
+                Last_Row_Txn_ID := -1;
+            end if;
+
+            -- Stopping the thread if marked to be stopped when finished.
+            if P_Stop_At_Finish = 1 then
+                -- Marking the thread as finished successfully.
+                L_Is_Finished := 1;
+
+                exit;
+            else
+               -- Checking if the thread should do logging and checks for time-out/termination.
+                if SYSDATE >= Last_Thread_Checks + C_THREAD_CHECKS_INTERVAL_SEC/24/60/60 then
+                    
+                    -- Updating the archived rows count in the DATA_MANAGER_TXN_ARCH_THREADS.
+                    update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+                           DATA_MANAGER_TXN_ARCH_THREADS
+                    set    ARCHIVED_ROWS = Archived_Rows_Count
+                    where  THREAD_ID     = P_Thread_ID;
+
+                    commit;
+
+                    -- Checking for time-out
+                    if C_START_TIME + P_Time_Limit_Min/24/60 < SYSDATE then
+                    
+                        L_Is_Timed_Out := 1;
+                        L_Is_Finished := 1;
+
+                        -- Exiting.
+                        exit;
+                    end if;
+
+                    -- Checking for termination of the thread.
+                    select /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+                           IS_TERMINATED
+                    into   L_Is_Terminated
+                    from   DATA_MANAGER_TXN_ARCH_THREADS
+                    where  THREAD_ID  = P_Thread_ID;
+
+                    if L_Is_Terminated = 1 then
+                        L_Is_Finished := 1;
+                        
+                        -- Exiting.
+                        exit;
+                    end if;
+
+                    Last_Thread_Checks := SYSDATE;
+                end if;
+
+               -- Sleeping before checking for more rows for archiving.
+               DBMS_Lock.Sleep(C_SLEEP_WHILE_WAITING_FOR_ROWS); 
+            end if;
+        end if;        
+
+        Are_Rows_Found := 0;
+
+    end loop;
+
+    -- Marking the thread as finished/timed-out/terminated.
+    update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+           DATA_MANAGER_TXN_ARCH_THREADS
+    set    IS_FINISHED   = L_Is_Finished,
+           IS_TIMED_OUT  = L_Is_Timed_Out,
+           IS_TERMINATED = L_Is_Terminated
+    where  THREAD_ID = P_Thread_ID;
+
+    commit;
+  exception
+    when OTHERS then
+      v_errm := SUBSTR(SQLERRM, 1 , 200);
+
+      rollback;
+
+      -- Marked the thread as aborted with error and saving the error message.
+      update /*+ index(DATA_MANAGER_TXN_ARCH_THREADS DATA_MANAGER_TAT_IDXPK) */
+             DATA_MANAGER_TXN_ARCH_THREADS
+      set    IS_ERROR = 1,
+             ERROR    = v_errm
+      where  THREAD_ID  = P_Thread_ID;
+
+      commit;
+
+      Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_errm, null, Log_Manager.Msg_Type_Error);
+  end Txn_Archive_Thread;
+  
+    PROCEDURE ARCHIVE_AND_DELETE_DATA(P_OWNER IN VARCHAR2 DEFAULT USER) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'ARCHIVE_AND_DELETE_DATA';
+      l_curr_jobs_count            NUMBER;
+      INT_JOB_ID                   NUMBER := NULL;
+      
+      c_max_parallel               NUMBER ;
+      c_sleep_sec                  NUMBER ;
+      c_total_run_time               NUMBER ;
+      
+      l_start_date                   DATE := sysdate;
+      
+      v_operation                 VARCHAR2 (100);
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;
+      l_dm_id                      NUMBER;
+      l_tmp_num                      NUMBER;
+      l_cmd                          VARCHAR2 (2000);
+      
+      l_cnt_miss_in_user_archive    NUMBER;
+      l_cnt_not_in_app_archive        NUMBER;
+      l_cnt_dw_miss_in_user_archive    NUMBER;
+      l_cnt_dw_not_in_app_archive    NUMBER;
+      l_cnt_mismatches                NUMBER;
+      l_cnt_dw_mismatches            NUMBER;
+      
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+      
+        log_manager.write_to_log_table(p_app_name=>C_APP_NAME,
+                                       p_message_type => 0, 
+                                       p_message => 'Start ARCHIVE_AND_DELETE_DATA for ' || P_OWNER );
+
+        SELECT DATA_MANAGER_LOG_SEQ.nextval
+        INTO l_dm_id
+        FROM DUAL; 
+        
+        begin
+            EXECUTE IMMEDIATE 
+                'select count(*) 
+                from (
+                    select upper(''' || P_OWNER || ''') , TABLE_NAME,DEST_TABLE_NAME,RETENTION,ARCHIVE_COLUMN,ORDER_IN_PROCESS,PARTITIONED,ADDITIONAL_CONDITION,STATUS from ' || P_OWNER || '.user_archive_definitions a
+                    minus
+                    select OWNER,TABLE_NAME,DEST_TABLE_NAME,RETENTION,ARCHIVE_COLUMN,ORDER_IN_PROCESS,PARTITIONED,ADDITIONAL_CONDITION,STATUS from all_archive_definitions
+                    where owner = upper(''' || P_OWNER || ''')
+                    )'
+                into l_tmp_num;
+                
+            if l_tmp_num > 0 then
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'CRITICAL ERROR - Incompatibility between user_archive_definitions and all_archive_definitions.' , NULL, Log_Manager.Msg_Type_Error);
+            end if;
+        exception
+            when others then
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'ERROR checking all_archive_definitions.' , NULL, 1);
+        end;
+    
+        select count(*)
+          into l_tmp_num
+          from user_tables
+         where table_name = 'APP_ARCHIVE_DEFINITIONS';
+        
+        -- Find mismatches 
+        if l_tmp_num > 0 then
+          l_cmd := 'select count(*) 
+                from (select source_table_name as "missing in user_archive" from ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS
+                    minus
+                    select table_name from ' || P_OWNER || '.user_archive_definitions)';
+          execute immediate l_cmd into l_cnt_miss_in_user_archive;
+
+          if l_cnt_miss_in_user_archive > 0 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are tables in APP_ARCHIVE_DEFINITIONS and not in user_archive_definitions.' , NULL, Log_Manager.Msg_Type_Info);
+          end if;
+          
+          l_cmd := 'select count(*) 
+                from (select table_name as "Not in app_archive" from ' || P_OWNER || '.user_archive_definitions where table_name not like ''DW%''
+                    minus
+                    select source_table_name from ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS)';
+          execute immediate l_cmd into l_cnt_not_in_app_archive;
+          
+          if l_cnt_not_in_app_archive > 0 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are tables in user_archive_definitions and not in APP_ARCHIVE_DEFINITIONS.' , NULL, Log_Manager.Msg_Type_Info);
+          end if;
+          
+          if P_OWNER like '%PROD' and P_OWNER not like '%PREPROD' then
+              l_cmd := 'select count(*) 
+                    from (select source_table_name as "source_table_name_miss_lvl_2" from ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS
+                            where level_2_retention is not null
+                        minus
+                        select u1.table_name
+                        from ' || P_OWNER || '.user_archive_definitions u1,
+                                ' || P_OWNER || '.user_archive_definitions u2
+                        where u1.dest_table_name = u2.table_name)';
+              execute immediate l_cmd into l_cnt_dw_miss_in_user_archive;
+              
+              if l_cnt_dw_miss_in_user_archive > 0 then
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are DW tables in APP_ARCHIVE_DEFINITIONS and not in user_archive_definitions.' , NULL, Log_Manager.Msg_Type_Info);
+              end if;
+          else
+            l_cnt_dw_miss_in_user_archive := 0;
+          end if;
+
+          
+          l_cmd := 'select count(*) 
+                from (select u1.table_name as "Level_2 not in app_archive"
+                        from ' || P_OWNER || '.user_archive_definitions u1,
+                                ' || P_OWNER || '.user_archive_definitions u2
+                        where u1.dest_table_name = u2.table_name
+                        minus
+                        select  source_table_name
+                                from ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS
+                        where level_2_retention is not null)';
+          execute immediate l_cmd into l_cnt_dw_not_in_app_archive;
+          
+          if l_cnt_dw_not_in_app_archive > 0 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are DW tables in user_archive_definitions and not in APP_ARCHIVE_DEFINITIONS.' , NULL, Log_Manager.Msg_Type_Info);
+          end if;
+          
+          
+          l_cmd := 'select count(*) 
+                from (select u.table_name, u.archive_column, a.column_name app_col_name, 
+                                 a.level_1_retention, u.retention,  U.NEPTUNE_GROUP_ID, A.GROUP_ID
+                        from ' || P_OWNER || '.user_archive_definitions u,
+                               ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS a
+                        where u.table_name = a.source_table_name
+                          and (u.archive_column <> a.column_name
+                                  or  a.level_1_retention <> u.retention
+                                  or nvl(U.NEPTUNE_GROUP_ID, -999) <> nvl(A.GROUP_ID, -999)
+                                ))';
+          execute immediate l_cmd into l_cnt_mismatches;
+          
+          if l_cnt_mismatches > 0 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are mismatches in live tables between user_archive_definitions and APP_ARCHIVE_DEFINITIONS.' , NULL, Log_Manager.Msg_Type_Info);
+          end if;
+          
+          
+          l_cmd := 'select count(*) 
+                from (select u.table_name, u.archive_column, a.column_name app_col_name, 
+                                 a.level_2_retention, u.retention,  U.NEPTUNE_GROUP_ID, A.GROUP_ID
+                        from (
+                                select u1.table_name, u2.archive_column,  u2.retention,  U2.NEPTUNE_GROUP_ID
+                                from ' || P_OWNER || '.user_archive_definitions u1,
+                                        ' || P_OWNER || '.user_archive_definitions u2
+                                where u1.dest_table_name = u2.table_name) u,
+                               ' || P_OWNER || '.APP_ARCHIVE_DEFINITIONS a
+                        where u.table_name = a.source_table_name
+                          and (u.archive_column <> a.column_name
+                                  or  a.level_2_retention <> u.retention
+                                  or nvl(U.NEPTUNE_GROUP_ID, -999) <> nvl(A.GROUP_ID, -999)
+                                ))';
+          execute immediate l_cmd into l_cnt_dw_mismatches;
+          
+          if l_cnt_dw_mismatches > 0 then
+            Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'WARNING - There are mismatches in DW tables between user_archive_definitions and APP_ARCHIVE_DEFINITIONS.' , NULL, Log_Manager.Msg_Type_Info);
+          end if;
+          
+          if l_cnt_miss_in_user_archive    + l_cnt_not_in_app_archive + l_cnt_dw_miss_in_user_archive +
+              l_cnt_dw_not_in_app_archive + l_cnt_mismatches + l_cnt_dw_mismatches > 0 then
+--            raise_application_error(-20101, 'Incompatibility between user_archive_definitions and APP_ARCHIVE_DEFINITIONS');
+            null;
+          end if;
+
+        end if;
+
+         
+        select nvl(to_number(get_key_value(P_OWNER, 'max_parallel')), 2)
+          into c_max_parallel
+          from dual;
+
+        select nvl(to_number(get_key_value(P_OWNER, 'sleep_sec')), 60)
+          into c_sleep_sec
+          from dual;
+          
+        -- value in minutes
+        select nvl(to_number(get_key_value(P_OWNER, 'total_run_time')),1440)
+          into c_total_run_time
+          from dual;
+          
+        FOR I IN (SELECT *
+                            FROM   ALL_ARCHIVE_DEFINITIONS T
+                            WHERE  STATUS = 1
+                            AND    OWNER = P_OWNER
+                            AND    PARTITIONED = 0
+                            AND    nvl(DEST_TABLE_NAME, 'Dest') <> 'NEPTUNE'
+                            ORDER  BY ORDER_IN_PROCESS) LOOP
+          BEGIN
+          
+            l_curr_jobs_count := c_max_parallel;
+            while l_curr_jobs_count >= c_max_parallel loop
+                select count(*) 
+                into l_curr_jobs_count
+                from user_jobs
+                where this_date is not null
+                  and broken = 'N'
+                  and what like '%DATA_MANAGER%';
+                
+                if l_curr_jobs_count >= c_max_parallel then
+                  DBMS_LOCK.SLEEP(c_sleep_sec);
+                end if;
+            end loop;
+            
+            
+            -- check if job should stop
+            if get_key_value(P_OWNER, 'stop_archive') is not null then
+             Log_Manager.Write_To_Log_Table
+                (C_APP_NAME, systimestamp, v_component ||' user requested cancel of current operation by running STOP_ARCHIVE_JOB.', NULL, Log_Manager.Msg_Type_Warning);
+
+            FOR I IN (select job
+                        from user_jobs
+                       where what like '%DATA_MANAGER%') LOOP
+              BEGIN
+                dbms_job.remove(I.job);
+              EXCEPTION
+                WHEN OTHERS THEN
+                  Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'STOP_ARCHIVE_JOB. dbms_job.remove ' || I.job || '. ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+              END;
+            END LOOP;
+        
+             delete archive_configuration where SCHEMA in (P_OWNER, 'PUBLIC') and KEY_NAME = 'stop_archive';
+             
+             exit;
+            end if;
+              
+            if (sysdate-l_start_date)*1440 > c_total_run_time then
+             Log_Manager.Write_To_Log_Table
+                (C_APP_NAME, systimestamp, v_component ||' TIMEOUT - ' || c_total_run_time || ' minutes.', NULL, Log_Manager.Msg_Type_Warning);
+             exit;
+            end if;
+            
+            IF I.DEST_TABLE_NAME is null THEN
+/*                DATA_MANAGER.DELETE_ROWS(P_TABLE_NAME => I.TABLE_NAME,
+                                                             P_CHUNK_SIZE           => I.CHUNK_SIZE,
+                                                             P_CONDITION            => I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' ||
+                                                                                                                 I.RETENTION || ') and ' ||
+                                                                                                                 nvl(I.ADDITIONAL_CONDITION, '1=1'),
+                                                             P_TIME_LIMIT_MIN       => I.TIME_LIMIT,
+                                                             P_SLEEP_SEC            => I.SLEEP,
+                                                             P_LOGGING_INTERVAL_MIN => I.LOGGING_INTERVAL,
+                                                             P_HINT                 => I.HINT);*/
+                                                             
+                DBMS_JOB.SUBMIT (
+                 job => INT_JOB_ID,
+                  what => 'DATA_MANAGER.DELETE_ROWS(''' || I.TABLE_NAME || ''',''' || I.CHUNK_SIZE || ''',''' || 
+                                                        I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' || I.RETENTION || ') and ' || nvl(I.ADDITIONAL_CONDITION, '1=1') ||
+                                                        ''',''' || I.TIME_LIMIT || ''',''' || I.SLEEP || ''',''' || I.LOGGING_INTERVAL || ''',''' || I.HINT || ''',''' || I.RECREATE_MV_LOG || ''','||l_dm_id||');',
+                  next_date => SYSDATE, 
+                  interval => NULL );
+            ELSE
+/*                DATA_MANAGER.ARCHIVE_ROWS(P_SRC_TABLE_NAME       => I.TABLE_NAME,
+                                                                    P_DST_TABLE_NAME       => I.DEST_TABLE_NAME,
+                                                                    P_CHUNK_SIZE           => I.CHUNK_SIZE,
+                                                                    P_CONDITION            => I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' ||
+                                                                                                                        I.RETENTION || ') and ' ||
+                                                                                                                        nvl(I.ADDITIONAL_CONDITION, '1=1'),
+                                                                    P_TIME_LIMIT_MIN       => I.TIME_LIMIT,
+                                                                    P_SLEEP_SEC            => I.SLEEP,
+                                                                    P_LOGGING_INTERVAL_MIN => I.LOGGING_INTERVAL,
+                                                                    P_HINT                 => I.HINT,
+                                                                    P_RECREATE_MV_LOG       => I.RECREATE_MV_LOG); */
+                                                                    
+                DBMS_JOB.SUBMIT (
+                 job => INT_JOB_ID,
+                  what => 'DATA_MANAGER.ARCHIVE_ROWS(''' || I.TABLE_NAME || ''',''' || I.DEST_TABLE_NAME || ''',''' || I.CHUNK_SIZE || ''',''' || 
+                                                        I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' || I.RETENTION || ') and ' || nvl(I.ADDITIONAL_CONDITION, '1=1') ||
+                                                        ''',''' || I.TIME_LIMIT || ''',''' || I.SLEEP || ''',''' || I.LOGGING_INTERVAL || ''',''' || I.HINT || ''',''' || I.RECREATE_MV_LOG || ''','||l_dm_id||');',
+                  next_date => SYSDATE, 
+                  interval => NULL );
+            END IF;
+            
+            COMMIT;
+            
+            DBMS_LOCK.SLEEP(10);
+                                                             
+          EXCEPTION
+            WHEN OTHERS THEN
+
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_component || '->' || I.TABLE_NAME ||' ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+          END;
+        END LOOP;
+        
+        l_curr_jobs_count := c_max_parallel;
+        while l_curr_jobs_count > 0 loop
+            select count(*) 
+            into l_curr_jobs_count
+            from user_jobs
+            where this_date is not null
+              and what like '%DATA_MANAGER%';
+            
+            if l_curr_jobs_count >= 0 then
+              DBMS_LOCK.SLEEP(c_sleep_sec);
+            end if;
+            
+            -- check if job should stop
+            if get_key_value(P_OWNER, 'stop_archive') is not null then
+             Log_Manager.Write_To_Log_Table
+                (C_APP_NAME, systimestamp, v_component ||' user requested cancel of current operation by running STOP_ARCHIVE_JOB.', NULL, Log_Manager.Msg_Type_Warning);
+
+            FOR I IN (select job
+                        from user_jobs
+                       where what like '%DATA_MANAGER%') LOOP
+              BEGIN
+                dbms_job.remove(I.job);
+                commit;
+              EXCEPTION
+                WHEN OTHERS THEN
+                  Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'STOP_ARCHIVE_JOB. dbms_job.remove ' || I.job || '. ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+              END;
+            END LOOP;
+        
+             delete archive_configuration where SCHEMA in (P_OWNER, 'PUBLIC') and KEY_NAME = 'stop_archive';
+             
+             exit;
+            end if;
+        end loop;
+        
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+        write_dm_log (
+            l_dm_id,
+            null,
+            P_OWNER,
+            run_timestamp_start,
+            v_component,
+            'FINISHED',
+            null,
+            null,
+            null,
+            null,
+            run_timestamp_duration_ms,
+            null,
+            null,
+            null
+         );
+         
+        log_manager.write_to_log_table(p_app_name=>C_APP_NAME,
+                                       p_message_type => 0, 
+                                       p_message => 'End ARCHIVE_AND_DELETE_DATA for ' || P_OWNER );
+
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    EXCEPTION
+      WHEN OTHERS
+      THEN
+        run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+      
+        write_dm_log (
+            l_dm_id,
+            null,
+            P_OWNER,
+            run_timestamp_start,
+            v_component,
+            'FAILED',
+            null,
+            null,
+            null,
+            null,
+            run_timestamp_duration_ms,
+            null,
+            null,
+            null
+         );
+         
+          Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_component ||' ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+         
+         DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END ARCHIVE_AND_DELETE_DATA;
+    
+    PROCEDURE DELETE_DATA_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'DELETE_DATA_FOR_SCHEMA';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;            
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+        
+        FOR I IN (SELECT *
+                            FROM   ALL_ARCHIVE_DEFINITIONS T
+                            WHERE  STATUS = 1
+                            AND    OWNER = P_OWNER
+                            AND    PARTITIONED = 0
+--                            AND    DEST_TABLE_NAME = 'DROP/DELETE'
+                            AND    DEST_TABLE_NAME is null
+                            ORDER  BY ORDER_IN_PROCESS) LOOP
+          BEGIN
+            run_timestamp_start := SYSTIMESTAMP;
+            DATA_MANAGER.DELETE_ROWS(P_TABLE_NAME => I.TABLE_NAME,
+
+                                                             P_CHUNK_SIZE           => I.CHUNK_SIZE,
+                                                             P_CONDITION            => I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' ||
+                                                                                                                 I.RETENTION || ') and ' ||
+                                                                                                                 nvl(I.ADDITIONAL_CONDITION, '1=1'),
+                                                             P_TIME_LIMIT_MIN       => I.TIME_LIMIT,
+                                                             P_SLEEP_SEC            => I.SLEEP,
+                                                             P_LOGGING_INTERVAL_MIN => I.LOGGING_INTERVAL,
+                                                             P_HINT                 => I.HINT);
+                                                             
+            run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+/*            PARTITION_MANAGER.write_pm_log (
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'DATA_MANAGER.DELETE_ROWS for table ' || I.TABLE_NAME || ' finished successfully. ',
+                run_timestamp_duration_ms
+             );    */
+          EXCEPTION
+            WHEN OTHERS THEN
+                run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+/*                PARTITION_MANAGER.write_pm_log (
+                    P_OWNER, 
+                    run_timestamp_start,
+                    v_component,
+                    I.TABLE_NAME,
+                    2010,
+                    'DATA_MANAGER.DELETE_ROWS for table ' || I.TABLE_NAME || ' finished with error. ' || 
+                      'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace(),
+                    run_timestamp_duration_ms
+                 );        */     
+                Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_component || '->' || I.TABLE_NAME ||' ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+          END;
+        END LOOP;
+        
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END DELETE_DATA_FOR_SCHEMA;
+
+    PROCEDURE ARCHIVE_DATA_FOR_SCHEMA(P_OWNER IN VARCHAR2 DEFAULT USER) IS
+      prev_module                 VARCHAR2 (50);
+      prev_action                 VARCHAR2 (50);
+      v_component                 VARCHAR2 (100) := 'ARCHIVE_DATA_FOR_SCHEMA';
+      run_timestamp_start         TIMESTAMP := SYSTIMESTAMP;
+      run_timestamp_duration_ms   NUMBER;      
+    BEGIN
+        DBMS_APPLICATION_INFO.read_module (prev_module, prev_action);
+        DBMS_APPLICATION_INFO.set_module  (v_module_name, v_component);
+        
+        FOR I IN (SELECT *
+                            FROM   ALL_ARCHIVE_DEFINITIONS T
+                            WHERE  STATUS = 1
+                            AND    OWNER = P_OWNER
+                            AND    PARTITIONED = 0
+                            AND    DEST_TABLE_NAME IS NOT NULL
+                            AND    DEST_TABLE_NAME <> 'NEPTUNE'
+                            ORDER  BY ORDER_IN_PROCESS) LOOP
+          BEGIN
+            run_timestamp_start := SYSTIMESTAMP;
+            DATA_MANAGER.ARCHIVE_ROWS(P_SRC_TABLE_NAME       => I.TABLE_NAME,
+                                                                P_DST_TABLE_NAME       => I.DEST_TABLE_NAME,
+                                                                P_CHUNK_SIZE           => I.CHUNK_SIZE,
+                                                                P_CONDITION            => I.ARCHIVE_COLUMN || ' < Trunc(SYSDATE - ' ||
+                                                                                                                    I.RETENTION || ') and ' ||
+                                                                                                                    nvl(I.ADDITIONAL_CONDITION, '1=1'),
+                                                                P_TIME_LIMIT_MIN       => I.TIME_LIMIT,
+                                                                P_SLEEP_SEC            => I.SLEEP,
+                                                                P_LOGGING_INTERVAL_MIN => I.LOGGING_INTERVAL,
+                                                                P_HINT                 => I.HINT);
+                                                                
+            run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+            
+/*            PARTITION_MANAGER.write_pm_log (
+                P_OWNER, 
+                run_timestamp_start,
+                v_component,
+                I.TABLE_NAME,
+                0,
+                'DATA_MANAGER.ARCHIVE_ROWS for table ' || I.TABLE_NAME || ' finished successfully. ',
+                run_timestamp_duration_ms
+             );    */
+             
+          EXCEPTION
+            WHEN OTHERS THEN
+                run_timestamp_duration_ms := CMN_DB_UTILS_PKG.timestamp2num (SYSTIMESTAMP) - CMN_DB_UTILS_PKG.timestamp2num (run_timestamp_start);
+                
+/*                PARTITION_MANAGER.write_pm_log (
+                    P_OWNER, 
+                    run_timestamp_start,
+                    v_component,
+                    I.TABLE_NAME,
+                    2010,
+                    'DATA_MANAGER.ARCHIVE_ROWS for table ' || I.TABLE_NAME || ' finished with error. ' || 
+                      'Oracle error: ' || SQLCODE || ':' || SQLERRM||' '||dbms_utility.format_error_backtrace(),
+                    run_timestamp_duration_ms
+                 );              */
+                 Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, v_component || '->' || I.TABLE_NAME ||' ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+          END;
+        END LOOP;
+        
+        DBMS_APPLICATION_INFO.set_module (prev_module, prev_action);
+    END ARCHIVE_DATA_FOR_SCHEMA;
+
+    PROCEDURE STOP_ARCHIVE_JOB(P_OWNER  IN VARCHAR2 DEFAULT USER,
+                               P_OPTION IN VARCHAR2 DEFAULT 'abort') IS
+    BEGIN
+      insert into archive_configuration (SCHEMA, KEY_NAME, KEY_VALUE, LAST_SAVED_TIME) values (P_OWNER, 'stop_archive', P_OPTION, sysTIMESTAMP);
+      commit;
+      
+      if P_OPTION = 'abort' then
+        
+        FOR I IN (SELECT ss.sid,ss.serial# 
+                     FROM v$session ss
+                    where status = 'ACTIVE'
+                    and upper(module) like '%DATA_MANAGER.%ROWS%'
+                    and username = P_OWNER) LOOP
+          BEGIN
+            execute immediate 'Alter System Kill Session '''|| I.Sid || ',' || I.Serial# || ''' IMMEDIATE';
+          EXCEPTION
+            WHEN OTHERS THEN
+              Log_Manager.Write_To_Log_Table(C_APP_NAME, systimestamp, 'STOP_ARCHIVE_JOB. kill session ' || I.Sid || '. ERROR - ' || SUBSTR(SQLERRM, 1 , 200), null, Log_Manager.Msg_Type_Error);
+          END;
+        END LOOP;
+        
+      end if;
+      
+    END STOP_ARCHIVE_JOB;
+
+    PROCEDURE write_dm_log     (P_ID                NUMBER,
+                                P_BUCKET_ID            NUMBER,
+                                p_schema_name        VARCHAR2,
+                                p_operation_time    timestamp,
+                                p_component         VARCHAR2,
+                                p_operation         VARCHAR2,
+                                p_src_table_name    VARCHAR2,
+                                p_dst_table_name    VARCHAR2,
+                                p_BUCKET_SIZE       NUMBER,
+                                p_ROWS_PER_MINUTE   VARCHAR2,
+                                p_total_time_ms     NUMBER,
+                                p_size_mb           NUMBER,
+                                p_fields_number     NUMBER,
+                                p_indexes_number    NUMBER)
+   IS
+      PRAGMA AUTONOMOUS_TRANSACTION;
+   BEGIN
+      INSERT INTO DATA_MANAGER_LOG (
+                               ID,
+                               BUCKET_ID,
+                               SCHEMA_NAME,
+                               operation_time,
+                               component,
+                               operation,
+                               src_table_name,
+                               dst_table_name,
+                               BUCKET_SIZE,
+                               ROWS_PER_MINUTE,
+                               total_time_ms,
+                               SIZE_MB,
+                               FIELDS_NUMBER,
+                               INDEXES_NUMBER)
+        VALUES   (P_ID,
+                  P_BUCKET_ID,
+                  p_schema_name,
+                  p_operation_time,
+                  p_component,
+                  p_operation,
+                  p_src_table_name,
+                  p_dst_table_name,
+                  p_BUCKET_SIZE,
+                  trunc(p_ROWS_PER_MINUTE),
+                  p_total_time_ms,
+                  p_size_mb,
+                  p_fields_number,
+                  p_indexes_number );
+        
+      COMMIT;
+   END write_dm_log;
+   
+end Data_Manager;
+/
+
+begin
+  delete VERSIONS
+  where  COMPONENT_NAME = Data_Manager.C_APP_NAME;
+  
+  insert into VERSIONS(COMPONENT_NAME,
+                       VERSION,
+                       UPDATE_TIME)
+              values (Data_Manager.C_APP_NAME,
+                      Data_Manager.VERSION,
+                      SYSDATE);
+  commit;
+end;
+/
+
+

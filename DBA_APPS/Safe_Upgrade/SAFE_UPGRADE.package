@@ -1,0 +1,1682 @@
+CREATE OR REPLACE PACKAGE DBA_APPS.SAFE_UPGRADE AUTHID CURRENT_USER AS
+
+  C_APP_NAME CONSTANT VARCHAR2(30) := 'SAFE_UPGRADE';
+  VERSION    CONSTANT VARCHAR2(30) := '1.11';
+
+    -- version return function
+    FUNCTION FUNC_VERSION return VARCHAR2;
+    
+    -- Adds a column to a table.
+    PROCEDURE CREATE_TABLE (P_TABLE_NAME VARCHAR2, P_CREATE_COMMAND VARCHAR2);
+    
+    -- Adds an FK to a table.
+    PROCEDURE CREATE_FK (P_FK_NAME VARCHAR2,P_SOURCE_TABLE_NAME VARCHAR2, P_DEST_TABLE_NAME VARCHAR2,P_SOURCE_COLUMN_NAME VARCHAR2, P_DEST_COLUMN_NAME VARCHAR2,P_DEFERRABLE VARCHAR2);
+  
+    -- Adds a column to a table.
+    PROCEDURE ADD_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2, P_COLUMN_TYPE VARCHAR2,
+                                             P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2);
+
+    -- Drops a column from a table.                                             
+    PROCEDURE DROP_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2);
+
+    -- Modifies a column (for now, just calls add_column as it modifies if column already exists)
+    PROCEDURE MODIFY_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2, P_COLUMN_TYPE VARCHAR2,
+                                                    P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2);
+
+    PROCEDURE RENAME_COLUMN(P_TABLE_NAME VARCHAR2, P_OLD_COLUMN_NAME VARCHAR2, P_NEW_COLUMN_NAME VARCHAR2, 
+                                P_COLUMN_TYPE VARCHAR2, P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2); 
+                                
+    -- Creates an index.
+    PROCEDURE CREATE_INDEX(P_TABLE_NAME VARCHAR2, P_INDEX_NAME VARCHAR2, P_COLUMNS VARCHAR2,
+                                                 P_UNIQUE NUMBER, P_REVERSE NUMBER DEFAULT 0, P_GLOBAL NUMBER DEFAULT 1);
+                                                 
+    -- Drops an index from a table.                                             
+    PROCEDURE DROP_INDEX(P_INDEX_NAME VARCHAR2);
+    
+    -- Drops a constraint from a table (with underlying index).
+    PROCEDURE DROP_CONSTRAINT(P_TABLE_NAME VARCHAR2, P_CONSTRAINT_NAME VARCHAR2);
+    
+    -- Drops a package.
+    PROCEDURE DROP_PKG(P_PKG_NAME VARCHAR2);
+    
+    -- Drops a procedure.
+    PROCEDURE DROP_PROCEDURE(P_PROCEDURE_NAME VARCHAR2);
+    
+    -- Drops a function.
+    PROCEDURE DROP_FUNCTION(P_FUNCTION_NAME VARCHAR2);
+    
+    -- Drops a sequence.
+    PROCEDURE DROP_SEQUENCE(P_SEQUENCE_NAME VARCHAR2);
+    
+    -- Drops a view.
+    PROCEDURE DROP_VIEW(P_VIEW_NAME VARCHAR2);
+    
+    -- Drops a materialized view.
+    PROCEDURE DROP_MVIEW(P_MVIEW_NAME VARCHAR2);
+    
+    -- Drop Materialized view log from a table
+    PROCEDURE DROP_MVIEW_LOG(P_TABLE_NAME VARCHAR2);
+    
+    -- Drops a table.
+    PROCEDURE DROP_TABLE(P_TABLE_NAME VARCHAR2);
+
+    /* Ecexute all actions for schema (Not in Use) */
+    PROCEDURE EXECUTE_ALL;
+    /* Ecexute all actions for table (Not in Use) */
+    PROCEDURE EXECUTE_TABLE(P_TABLE_NAME VARCHAR2);
+    
+    -- Example:
+    -- exec SAFE_UPGRADE.safe_execute('drop table zeev', -942);
+    PROCEDURE safe_execute (cmd VARCHAR2, 
+                            ignorecode VARCHAR2, 
+                            verbose BOOLEAN default true);
+
+    -- Examples:
+    -- exec SAFE_UPGRADE.execute_with_condition ('select 5 from dual', '=', '5', 'drop table zbz');
+    -- exec SAFE_UPGRADE.execute_with_condition ('select 5 from dual', '>', '5', 'drop table zbz');
+    -- exec SAFE_UPGRADE.execute_with_condition ('select 567 from dual', 'like', '''56%''', 'drop table zbz');
+    -- exec SAFE_UPGRADE.execute_with_condition ('select 5 from dual', 'in', '(4,6)', 'drop table zbz');    
+    PROCEDURE execute_with_condition (p_sql_query         VARCHAR2, 
+                                      p_check_operator     VARCHAR2, 
+                                      v_limit_value     VARCHAR2,
+                                      p_cmd             VARCHAR2);
+
+END;
+/
+
+CREATE OR REPLACE PACKAGE BODY DBA_APPS.SAFE_UPGRADE AS
+
+    /*
+  
+       constants
+       
+  */
+
+    C_STATUS_WAITING   NUMBER := 0;
+    C_STATUS_DONE      NUMBER := 1;
+    C_STATUS_ERROR     NUMBER := 2;
+    C_STATUS_REDUNDENT NUMBER := 3;
+
+    C_ACTION_CREATE NUMBER := 1;
+    C_ACTION_DROP   NUMBER := 2;
+    C_ACTION_ALTER  NUMBER := 3;
+
+    C_OBJECT_TYPE_TABLE     NUMBER := 1;
+    C_OBJECT_TYPE_INDEX     NUMBER := 2;
+    C_OBJECT_TYPE_SEQUENCE  NUMBER := 3;
+    C_OBJECT_TYPE_PACKAGE   NUMBER := 4;
+    C_OBJECT_TYPE_PROCEDURE NUMBER := 5;
+    C_OBJECT_TYPE_FUNCTION  NUMBER := 6;
+    C_OBJECT_TYPE_VIEW      NUMBER := 7;
+    C_OBJECT_TYPE_MVIEW     NUMBER := 8;
+    C_OBJECT_TYPE_MVIEW_LOG NUMBER := 9;
+
+    C_ALTER_ACTION_ADD    NUMBER := 1;
+    C_ALTER_ACTION_MODIFY NUMBER := 2;
+    C_ALTER_ACTION_DROP   NUMBER := 3;
+
+    C_ALTER_OBJECT_TYPE_COLUMN     NUMBER := 1;
+    C_ALTER_OBJECT_TYPE_CONSTRAINT NUMBER := 2;
+    
+    FUNCTION FUNC_VERSION return VARCHAR2
+    is
+    begin
+    return VERSION;
+    end FUNC_VERSION;
+    
+        PROCEDURE CREATE_FK (P_FK_NAME VARCHAR2,P_SOURCE_TABLE_NAME VARCHAR2, P_DEST_TABLE_NAME VARCHAR2,P_SOURCE_COLUMN_NAME VARCHAR2, P_DEST_COLUMN_NAME VARCHAR2,P_DEFERRABLE VARCHAR2) AS
+
+        V_CREATE_COMMAND varchar2(4000);
+        v_counter number;
+        V_DEFERRABLE varchar2(1000) default 'DEFERRABLE INITIALLY IMMEDIATE';
+
+        BEGIN
+
+        select count(1)
+        into v_counter
+        from user_constraints
+        where CONSTRAINT_NAME = upper(P_FK_NAME);
+
+            IF upper(P_DEFERRABLE) = 'N' THEN
+
+            V_DEFERRABLE :='DEFERRABLE INITIALLY DEFERRED';
+
+            END IF;
+
+
+            IF v_counter = 0 THEN
+
+            V_CREATE_COMMAND := 'ALTER TABLE '||P_DEST_TABLE_NAME||' ADD CONSTRAINT '||P_FK_NAME||' FOREIGN KEY ('||P_SOURCE_COLUMN_NAME||') REFERENCES '||P_SOURCE_TABLE_NAME||' ('||P_DEST_COLUMN_NAME||') '||V_DEFERRABLE||'';
+            execute immediate V_CREATE_COMMAND;
+            --dbms_output.put_line (V_CREATE_COMMAND);
+
+            END IF;
+
+    END CREATE_FK;
+    
+    
+    PROCEDURE CREATE_TABLE (P_TABLE_NAME VARCHAR2, P_CREATE_COMMAND VARCHAR2) AS
+    v_counter number;
+    V_CREATE_COMMAND VARCHAR2(4000);
+
+    begin
+
+    select count(1)
+    into v_counter
+    from user_tables
+    where table_name = upper(P_TABLE_NAME);
+
+    IF v_counter = 0 THEN
+
+    V_CREATE_COMMAND := REPLACE(P_CREATE_COMMAND,''',''''');
+    V_CREATE_COMMAND := REPLACE(P_CREATE_COMMAND,';','');
+    --dbms_output.put_line (V_CREATE_COMMAND);
+    execute immediate V_CREATE_COMMAND;
+
+    END IF;
+
+    END CREATE_TABLE;
+
+    PROCEDURE ALTERFKSREFERRINGTABLE(PACTION IN VARCHAR2, PTABLE IN VARCHAR2,
+                                                                     POWNER IN VARCHAR2 DEFAULT USER) AS
+    
+        CURSOR FKLIST(LPOWNER IN VARCHAR2, LPTABLE IN VARCHAR2, LPACTION IN VARCHAR2) IS
+        -- Generate 'ALTER TABLE table_name DISABLE/ENABLE  CONSTRAINT' SQLs
+            SELECT 'ALTER TABLE ' || FK.OWNER || '.' || FK.TABLE_NAME || ' ' || LPACTION ||
+                         ' CONSTRAINT ' || FK.CONSTRAINT_NAME AS ALTERFK
+            FROM   ALL_CONSTRAINTS FK,
+                         ALL_INDEXES     IDX
+            WHERE  FK.CONSTRAINT_TYPE = 'R'
+            AND    IDX.TABLE_OWNER LIKE LPOWNER
+            AND    IDX.TABLE_NAME LIKE LPTABLE
+            AND    FK.R_CONSTRAINT_NAME = IDX.INDEX_NAME
+            AND    FK.R_OWNER = IDX.TABLE_OWNER
+            ORDER  BY 1;
+        -- END CURSOR FKList
+    
+    BEGIN
+        /*alterFKsReferringTable*/
+    
+        FOR FKS IN FKLIST(UPPER(POWNER), UPPER(PTABLE), UPPER(PACTION)) LOOP
+            /* FKs */
+            BEGIN
+                /* alter FK */
+                EXECUTE IMMEDIATE FKS.ALTERFK;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END /* alter FK */
+            ;
+        END LOOP /* FKs */
+        ;
+    
+    END ALTERFKSREFERRINGTABLE;
+
+    FUNCTION IS_TABLE_PARTITIONED(P_TABLE_NAME IN VARCHAR2) RETURN BOOLEAN IS
+        L_PARTITIONED VARCHAR2(10);
+    BEGIN
+        SELECT PARTITIONED INTO L_PARTITIONED FROM USER_TABLES WHERE TABLE_NAME = P_TABLE_NAME;
+    
+        IF L_PARTITIONED = 'YES' THEN
+            RETURN TRUE;
+        ELSE
+            RETURN FALSE;
+        END IF;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN FALSE;
+    END;
+
+    PROCEDURE UPDATE_STEP_STATUS(P_STEP_ID NUMBER, P_STATUS NUMBER, P_SQLERRM VARCHAR2 DEFAULT NULL) IS
+    BEGIN
+        UPDATE UPGRADE_STEPS T
+        SET    T.STATUS = P_STATUS, T.ERROR_MESSAGE = P_SQLERRM
+        WHERE  T.ID = P_STEP_ID;
+        COMMIT;
+    END;
+
+    /*
+  
+       Sanitize functions
+       
+  */
+
+    -- Refactored procedure SANITIZE 
+    FUNCTION SANITIZE(P_PARAM IN VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN REPLACE(UPPER(P_PARAM), ' ', '');
+    END SANITIZE;
+
+    /*
+  
+       get functions
+       
+  */
+
+    -- Refactored procedure get_index_name_by_columns 
+    PROCEDURE GET_INDEX_NAME_BY_COLUMNS(P_TABLE_NAME IN VARCHAR2, L_COLUMNS IN VARCHAR2,
+                                                                            L_EXISTING_INDEX_NAME IN OUT VARCHAR2) IS
+    BEGIN
+        SELECT INDEX_NAME
+        INTO   L_EXISTING_INDEX_NAME
+        FROM   (SELECT INDEX_NAME,
+                                     LISTAGG(T.COLUMN_NAME, ',') WITHIN GROUP(ORDER BY T.COLUMN_POSITION) COLUMNS
+                        FROM   USER_IND_COLUMNS T
+                        WHERE  T.TABLE_NAME = P_TABLE_NAME
+                        GROUP  BY INDEX_NAME) T2
+        WHERE  T2.COLUMNS = L_COLUMNS;
+    END GET_INDEX_NAME_BY_COLUMNS;
+
+    -- Refactored procedure get_uniquness_clause 
+    PROCEDURE GET_UNIQUNESS_CLAUSE(P_UNIQUE IN NUMBER, L_UNIQUENESS IN OUT VARCHAR2) IS
+    BEGIN
+        IF P_UNIQUE = 1 THEN
+            L_UNIQUENESS := 'UNIQUE';
+        END IF;
+    END GET_UNIQUNESS_CLAUSE;
+    -- Refactored procedure get_nullable_for_col 
+    PROCEDURE GET_NULLABLE_FOR_COL(P_TABLE_NAME IN VARCHAR2, P_COLUMN_NAME IN VARCHAR2,
+                                                                 L_NULLABLE IN OUT USER_TAB_COLUMNS.NULLABLE%TYPE) IS
+    BEGIN
+        SELECT NULLABLE
+        INTO   L_NULLABLE
+        FROM   USER_TAB_COLUMNS T
+        WHERE  T.TABLE_NAME = P_TABLE_NAME
+        AND    T.COLUMN_NAME = P_COLUMN_NAME;
+    END GET_NULLABLE_FOR_COL;
+
+    FUNCTION GET_NULL_CLAUSE_FROM_Y_N(P_NULLABLE VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+    
+        IF P_NULLABLE = 'Y' THEN
+            RETURN('null');
+        ELSIF P_NULLABLE = 'N' THEN
+            RETURN('not null');
+        ELSE
+            RAISE_APPLICATION_ERROR(-20001, 'Y/N expected');
+        END IF;
+    END GET_NULL_CLAUSE_FROM_Y_N;
+
+    FUNCTION GET_DEFAULT_CLAUSE_FOR_VALUE(P_DEFAULT VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        IF P_DEFAULT IS NULL THEN
+            RETURN('');
+        ELSIF P_DEFAULT IS NOT NULL THEN
+            RETURN('default ' || P_DEFAULT);
+        END IF;
+    END GET_DEFAULT_CLAUSE_FOR_VALUE;
+
+    -- Refactored procedure get_user_ind_uniqueness 
+    PROCEDURE GET_USER_IND_UNIQUENESS(P_UNIQUE IN NUMBER, L_USER_IND_UNIQUE IN OUT VARCHAR2) IS
+    BEGIN
+        IF P_UNIQUE = 1 THEN
+            L_USER_IND_UNIQUE := 'UNIQUE';
+        ELSE
+            L_USER_IND_UNIQUE := 'NONUNIQUE';
+        END IF;
+    END GET_USER_IND_UNIQUENESS;
+    /*
+  
+       exists functions
+       
+  */
+
+    -- Refactored procedure exists_index_with_columns 
+    PROCEDURE EXISTS_INDEX_WITH_COLUMNS(P_TABLE_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER,
+                                                                            L_COLUMNS IN VARCHAR2) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   (SELECT INDEX_NAME,
+                                     LISTAGG(T.COLUMN_NAME, ',') WITHIN GROUP(ORDER BY T.COLUMN_POSITION) COLUMNS
+                        FROM   USER_IND_COLUMNS T
+                        WHERE  T.TABLE_NAME = P_TABLE_NAME
+                        GROUP  BY INDEX_NAME) T2
+        WHERE  T2.COLUMNS = L_COLUMNS
+        AND    ROWNUM < 2;
+    END EXISTS_INDEX_WITH_COLUMNS;
+
+    PROCEDURE EXISTS_INDEX_WITH_NAME(P_INDEX_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_INDEXES T
+        
+        WHERE  T.INDEX_NAME = P_INDEX_NAME
+        AND    ROWNUM < 2;
+    END EXISTS_INDEX_WITH_NAME;
+
+    -- Refactored procedure exists_index_with_collumns_and_uniqueness 
+    PROCEDURE EXISTS_INDEX_WITH_COLS_UNIQUE(P_TABLE_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER,
+                                                                                    L_COLUMNS IN VARCHAR2, L_UNIQUENESS IN VARCHAR2) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   (SELECT T2.INDEX_NAME,
+                                     T2.UNIQUENESS,
+                                     LISTAGG(T.COLUMN_NAME, ',') WITHIN GROUP(ORDER BY T.COLUMN_POSITION) COLUMNS
+                        FROM   USER_IND_COLUMNS T
+                        JOIN   USER_INDEXES T2 ON (T.INDEX_NAME = T2.INDEX_NAME)
+                        WHERE  T.TABLE_NAME = P_TABLE_NAME
+                        GROUP  BY T2.INDEX_NAME,
+                                            T2.UNIQUENESS) T2
+        WHERE  T2.COLUMNS = L_COLUMNS
+        AND    T2.UNIQUENESS = L_UNIQUENESS
+        AND    ROWNUM < 2;
+    END EXISTS_INDEX_WITH_COLS_UNIQUE;
+
+    -- Refactored procedure exists_index_with_collumns_and_uniqueness 
+    PROCEDURE EXISTS_INDEX_COLS_UNIQUE_NAME(P_TABLE_NAME IN VARCHAR2, P_INDEX_NAME IN VARCHAR2,
+                                                                                    L_EXISTS IN OUT NUMBER, L_COLUMNS IN VARCHAR2,
+                                                                                    L_UNIQUENESS IN VARCHAR2) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   (SELECT T2.INDEX_NAME,
+                                     T2.UNIQUENESS,
+                                     LISTAGG(T.COLUMN_NAME, ',') WITHIN GROUP(ORDER BY T.COLUMN_POSITION) COLUMNS
+                        FROM   USER_IND_COLUMNS T
+                        JOIN   USER_INDEXES T2 ON (T.INDEX_NAME = T2.INDEX_NAME)
+                        WHERE  T.TABLE_NAME = P_TABLE_NAME
+                        AND    T.INDEX_NAME = P_INDEX_NAME
+                        GROUP  BY T2.INDEX_NAME,
+                                            T2.UNIQUENESS) T2
+        WHERE  T2.COLUMNS = L_COLUMNS
+        AND    T2.UNIQUENESS = L_UNIQUENESS
+        AND    ROWNUM < 2;
+    END EXISTS_INDEX_COLS_UNIQUE_NAME;
+
+    -- Refactored procedure exists_col_by_table_and_name 
+    PROCEDURE EXISTS_COL_BY_TABLE_AND_NAME(P_TABLE_NAME IN VARCHAR2, P_COLUMN_NAME IN VARCHAR2,
+                                                                                 L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_TAB_COLUMNS T
+        WHERE  T.TABLE_NAME = P_TABLE_NAME
+        AND    T.COLUMN_NAME = P_COLUMN_NAME
+        AND    ROWNUM < 2;
+    END EXISTS_COL_BY_TABLE_AND_NAME;
+
+    -- Refactored procedure exists_col_by_table_and_name 
+    PROCEDURE EXISTS_CONS_BY_TABLE_AND_NAME(P_TABLE_NAME IN VARCHAR2, P_CONSTRAINT_NAME IN VARCHAR2,
+                                                                                    L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_CONSTRAINTS T
+        WHERE  T.TABLE_NAME = P_TABLE_NAME
+        AND    T.CONSTRAINT_NAME = P_CONSTRAINT_NAME
+        AND    ROWNUM < 2;
+    END EXISTS_CONS_BY_TABLE_AND_NAME;
+
+    PROCEDURE EXISTS_PKG_WITH_NAME(P_PKG_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   user_objects T
+        WHERE  T.OBJECT_NAME = P_PKG_NAME
+        AND    T.OBJECT_TYPE = 'PACKAGE'
+        AND    ROWNUM < 2;
+    END EXISTS_PKG_WITH_NAME;
+
+    PROCEDURE EXISTS_PROCEDURE_WITH_NAME(P_PROCEDURE_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   user_objects T
+        WHERE  T.OBJECT_NAME = P_PROCEDURE_NAME
+        AND    T.OBJECT_TYPE = 'PROCEDURE'
+        AND    ROWNUM < 2;
+    END EXISTS_PROCEDURE_WITH_NAME;
+
+    PROCEDURE EXISTS_FUNCTION_WITH_NAME(P_FUNCTION_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   user_objects T
+        WHERE  T.OBJECT_NAME = P_FUNCTION_NAME
+        AND    T.OBJECT_TYPE = 'FUNCTION'
+        AND    ROWNUM < 2;
+    END EXISTS_FUNCTION_WITH_NAME;
+
+    PROCEDURE EXISTS_SEQUENCE_WITH_NAME(P_SEQUENCE_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_SEQUENCES T
+        WHERE  T.SEQUENCE_NAME = P_SEQUENCE_NAME
+        AND    ROWNUM < 2;
+    END EXISTS_SEQUENCE_WITH_NAME;
+
+    /*
+  
+       execute immediate procedures
+       
+  */
+
+    -- Refactored procedure execute_rename_index 
+    PROCEDURE EXECUTE_RENAME_INDEX(P_INDEX_NAME IN VARCHAR2, L_EXISTING_INDEX_NAME IN OUT VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+        L_STATEMENT := 'alter index ' || L_EXISTING_INDEX_NAME || ' rename to ' || P_INDEX_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_RENAME_INDEX;
+
+    -- Refactored procedure execute_create_index 
+    PROCEDURE EXECUTE_CREATE_INDEX(P_TABLE_NAME IN VARCHAR2, P_INDEX_NAME IN VARCHAR2,
+                                                                 L_COLUMNS IN VARCHAR2, L_UNIQUENESS IN OUT VARCHAR2,
+                                                                 P_REVERSE NUMBER, P_GLOBAL NUMBER) IS
+        L_STATEMENT      VARCHAR2(32767);
+        L_REVERSE_CLAUSE VARCHAR2(30) := '';
+        L_GLOBAL_CLAUSE  VARCHAR2(30) := '';
+    BEGIN
+    
+        IF P_REVERSE = 1 THEN
+            L_REVERSE_CLAUSE := 'REVERSE';
+        END IF;
+    
+        IF P_GLOBAL = 0 AND IS_TABLE_PARTITIONED(P_TABLE_NAME) THEN
+            L_GLOBAL_CLAUSE := 'LOCAL';
+        ELSIF P_GLOBAL = 1 AND IS_TABLE_PARTITIONED(P_TABLE_NAME) THEN
+            L_GLOBAL_CLAUSE := 'GLOBAL';
+        END IF;
+    
+        L_STATEMENT := 'create ' || L_UNIQUENESS || ' index ' || P_INDEX_NAME || ' on ' || P_TABLE_NAME || '(' ||
+                                     L_COLUMNS || ') ' || L_GLOBAL_CLAUSE || ' ' || L_REVERSE_CLAUSE;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_CREATE_INDEX;
+
+    -- Refactored procedure execute_drop_index 
+    PROCEDURE EXECUTE_DROP_INDEX(P_INDEX_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+        L_STATEMENT := 'drop index ' || P_INDEX_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_INDEX;
+
+    -- Refactored procedure execute_modify_column 
+    PROCEDURE EXECUTE_MODIFY_COLUMN(P_TABLE_NAME IN VARCHAR2, P_COLUMN_NAME IN VARCHAR2,
+                                                                    P_COLUMN_TYPE IN VARCHAR2, P_DEFAULT IN VARCHAR2,
+                                                                    L_NULL_CLAUSE IN OUT VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+        L_COLUMN_TYPE VARCHAR2(40);
+    BEGIN
+        if P_COLUMN_TYPE like '%LOB%' then
+            L_COLUMN_TYPE := null;
+        else
+            L_COLUMN_TYPE := P_COLUMN_TYPE;
+        end if;
+        
+        L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' modify ' || P_COLUMN_NAME || ' ' ||
+                                     L_COLUMN_TYPE || ' ' || GET_DEFAULT_CLAUSE_FOR_VALUE(P_DEFAULT) || ' ' ||
+                                     L_NULL_CLAUSE /* null / not null*/
+         ;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_MODIFY_COLUMN;
+
+    -- Refactored procedure execute_modify_column 
+    PROCEDURE EXECUTE_ADD_COLUMN(P_TABLE_NAME IN VARCHAR2, P_COLUMN_NAME IN VARCHAR2,
+                                                             P_COLUMN_TYPE IN VARCHAR2, P_DEFAULT IN VARCHAR2,
+                                                             L_NULL_CLAUSE IN OUT VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+        l_version    number;
+        l_cnt_lob    number;
+    BEGIN
+    
+        L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' add ' || P_COLUMN_NAME || ' ' ||
+                                     P_COLUMN_TYPE || ' ' || GET_DEFAULT_CLAUSE_FOR_VALUE(P_DEFAULT) || ' ' ||
+                                     L_NULL_CLAUSE /* null / not null*/
+         ;
+    
+        if lower(L_STATEMENT) like '%default %not null%' then
+            select substr(version, 1, instr(version, '.')-1)
+            into l_version
+            from v$instance;
+            
+            select count(*) 
+            into   l_cnt_lob
+            from user_tab_columns
+            where table_name = P_TABLE_NAME
+            and data_type like '%LOB%';
+            
+            if l_version < 12 and l_cnt_lob > 0 then
+            
+                L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' add ' || P_COLUMN_NAME || ' ' ||
+                                             P_COLUMN_TYPE || ' ' || GET_DEFAULT_CLAUSE_FOR_VALUE(P_DEFAULT) ;
+                DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+                EXECUTE IMMEDIATE L_STATEMENT;
+
+                L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' modify ' || P_COLUMN_NAME || ' ' ||
+                                             L_NULL_CLAUSE ;
+                                             
+                DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+                EXECUTE IMMEDIATE L_STATEMENT;
+            else
+                DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+                EXECUTE IMMEDIATE L_STATEMENT;
+            end if;
+        else
+            DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+            EXECUTE IMMEDIATE L_STATEMENT;
+        end if;
+        
+
+    END EXECUTE_ADD_COLUMN;
+
+    -- Refactored procedure execute_drop_column 
+    PROCEDURE EXECUTE_DROP_COLUMN(P_TABLE_NAME IN VARCHAR2, P_COLUMN_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' drop column ' || P_COLUMN_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_COLUMN;
+
+    -- Refactored procedure execute_drop_table 
+    PROCEDURE EXECUTE_DROP_TABLE(P_TABLE_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop table ' || P_TABLE_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_TABLE;
+
+    -- Refactored procedure execute_drop_column 
+    PROCEDURE EXECUTE_DROP_CONSTRAINT(P_TABLE_NAME IN VARCHAR2, P_CONSTRAINT_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' drop constraint ' || P_CONSTRAINT_NAME ||
+                                     ' drop index';
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_CONSTRAINT;
+
+    -- Refactored procedure execute_drop_package 
+    PROCEDURE EXECUTE_DROP_PKG(P_PKG_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop package ' || P_PKG_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_PKG;
+
+    -- Refactored procedure execute_drop_procedure 
+    PROCEDURE EXECUTE_DROP_PROCEDURE(P_PROCEDURE_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop procedure ' || P_PROCEDURE_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_PROCEDURE;
+
+    -- Refactored function execute_drop_function 
+    PROCEDURE EXECUTE_DROP_FUNCTION(P_FUNCTION_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop function ' || P_FUNCTION_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_FUNCTION;
+
+    -- Refactored mview execute_drop_mview 
+    PROCEDURE EXECUTE_DROP_MVIEW(P_MVIEW_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop materialized view ' || P_MVIEW_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_MVIEW;
+
+    -- Refactored mview execute_drop_mview 
+    PROCEDURE EXECUTE_DROP_MVIEW_LOG(P_BASE_TABLE_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop materialized view log on ' || P_BASE_TABLE_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_MVIEW_LOG;
+
+    -- Refactored function execute_drop_function 
+    PROCEDURE EXECUTE_DROP_VIEW(P_VIEW_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop view ' || P_VIEW_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_VIEW;
+
+    -- Refactored sequence execute_drop_sequence 
+    PROCEDURE EXECUTE_DROP_SEQUENCE(P_SEQUENCE_NAME IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+    BEGIN
+    
+        L_STATEMENT := 'drop sequence ' || P_SEQUENCE_NAME;
+        DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+        EXECUTE IMMEDIATE L_STATEMENT;
+    END EXECUTE_DROP_SEQUENCE;
+
+    PROCEDURE EXISTS_VIEW_WITH_NAME(P_VIEW_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_VIEWS T
+        
+        WHERE  T.VIEW_NAME = P_VIEW_NAME;
+    END EXISTS_VIEW_WITH_NAME;
+
+    PROCEDURE EXISTS_MVIEW_WITH_NAME(P_MVIEW_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_MVIEWS T
+        
+        WHERE  T.MVIEW_NAME = P_MVIEW_NAME;
+    END EXISTS_MVIEW_WITH_NAME;
+
+    PROCEDURE EXISTS_MVIEW_LOG_FOR_TABLE(P_BASE_TABLE_NAME IN VARCHAR2, L_EXISTS IN OUT NUMBER) IS
+    BEGIN
+        SELECT COUNT(*)
+        INTO   L_EXISTS
+        FROM   USER_MVIEW_LOGS T
+        
+        WHERE  T.MASTER = P_BASE_TABLE_NAME;
+    END EXISTS_MVIEW_LOG_FOR_TABLE;
+
+    /*
+  
+       safe execution internal procedures
+       
+  */
+
+    PROCEDURE SAFE_CREATE_INDEX(P_STEP_ID NUMBER, P_TABLE_NAME VARCHAR2, P_INDEX_NAME VARCHAR2,
+                                                            P_COLUMNS VARCHAR2, P_UNIQUE NUMBER, P_REVERSE NUMBER, P_GLOBAL NUMBER) IS
+        L_EXISTS_WITH_NAME           NUMBER(1);
+        L_EXISTS_WITH_COLUMNS        NUMBER(1);
+        L_EXISTS_COLUMNS_UNIQUE_NAME NUMBER(1);
+        L_EXISTS_WITH_COLUMNS_UNIQUE NUMBER(1);
+    
+        L_EXISTING_INDEX_NAME VARCHAR2(30);
+        L_UNIQUENESS_CLAUSE   VARCHAR2(30) := '';
+        L_USER_IND_UNIQUE     VARCHAR2(30) := '';
+    
+    BEGIN
+    
+        GET_USER_IND_UNIQUENESS(P_UNIQUE, L_USER_IND_UNIQUE);
+        GET_UNIQUNESS_CLAUSE(P_UNIQUE, L_UNIQUENESS_CLAUSE);
+    
+        -- Already exists index with the same name?
+        EXISTS_INDEX_WITH_NAME(P_INDEX_NAME, L_EXISTS_WITH_NAME);
+    
+        /* exists index with same name */
+        IF L_EXISTS_WITH_NAME = 1 THEN
+        
+            -- Does existing index contain the same solumns in the same order asrequested?
+            -- 
+            EXISTS_INDEX_COLS_UNIQUE_NAME(P_TABLE_NAME,
+                                                                        P_INDEX_NAME,
+                                                                        L_EXISTS_COLUMNS_UNIQUE_NAME,
+                                                                        P_COLUMNS,
+                                                                        L_USER_IND_UNIQUE);
+        
+            /* existing index is with same columns and uniquness and name as requested */
+            IF L_EXISTS_COLUMNS_UNIQUE_NAME = 1 THEN
+            
+                -- Nothing to do
+                NULL;
+                UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+            
+                /* existing index has  columns / column order different than requested */
+            ELSE
+            
+                -- Drop index 
+                EXECUTE_DROP_INDEX(P_INDEX_NAME);
+            
+                /* with statictics? */
+                -- create index with appropriate columns (or rename existing one)
+                SAFE_CREATE_INDEX(P_STEP_ID,
+                                                    P_TABLE_NAME,
+                                                    P_INDEX_NAME,
+                                                    P_COLUMNS,
+                                                    P_UNIQUE,
+                                                    P_REVERSE,
+                                                    P_GLOBAL);
+            
+                UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+            END IF;
+        
+            /* no index with same name */
+        ELSE
+        
+            /* exists index with same columns? */
+            EXISTS_INDEX_WITH_COLUMNS(P_TABLE_NAME, L_EXISTS_WITH_COLUMNS, P_COLUMNS);
+        
+            /* exists index with same columns */
+            IF L_EXISTS_WITH_COLUMNS = 1 THEN
+            
+                GET_INDEX_NAME_BY_COLUMNS(P_TABLE_NAME, P_COLUMNS, L_EXISTING_INDEX_NAME);
+            
+                /* is uniquness the same? */
+                EXISTS_INDEX_WITH_COLS_UNIQUE(P_TABLE_NAME,
+                                                                            L_EXISTS_WITH_COLUMNS_UNIQUE,
+                                                                            P_COLUMNS,
+                                                                            L_USER_IND_UNIQUE);
+            
+                IF L_EXISTS_WITH_COLUMNS_UNIQUE = 1 THEN
+                
+                    EXECUTE_RENAME_INDEX(P_INDEX_NAME, L_EXISTING_INDEX_NAME);
+                
+                    /* index columns matching, but uniquness does not match requested */
+                ELSE
+                
+                    -- Drop index 
+                    EXECUTE_DROP_INDEX(L_EXISTING_INDEX_NAME);
+                
+                    /* with statictics? */
+                    -- create index with appropriate columns
+                    EXECUTE_CREATE_INDEX(P_TABLE_NAME,
+                                                             P_INDEX_NAME,
+                                                             P_COLUMNS,
+                                                             L_UNIQUENESS_CLAUSE,
+                                                             P_REVERSE,
+                                                             P_GLOBAL);
+                
+                END IF;
+            
+                /* no index with same columns */
+            ELSE
+                EXECUTE_CREATE_INDEX(P_TABLE_NAME,
+                                                         P_INDEX_NAME,
+                                                         P_COLUMNS,
+                                                         L_UNIQUENESS_CLAUSE,
+                                                         P_REVERSE,
+                                                         P_GLOBAL);
+            END IF;
+        END IF;
+    
+        UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_CREATE_INDEX;
+
+    PROCEDURE SAFE_ADD_COLUMN(P_STEP_ID IN NUMBER, P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2,
+                                                        P_COLUMN_TYPE VARCHAR2, P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2) IS
+        L_EXISTS      NUMBER(1);
+        L_NULLABLE    USER_TAB_COLUMNS.NULLABLE%TYPE;
+        L_NULL_CLAUSE VARCHAR2(10) := '';
+    
+    BEGIN
+    
+        EXISTS_COL_BY_TABLE_AND_NAME(P_TABLE_NAME, P_COLUMN_NAME, L_EXISTS);
+    
+        /* exists a column with requested name */
+        IF L_EXISTS = 1 THEN
+        
+            /* select value from "nullable" colmn in user_tab_columns for this column*/
+            GET_NULLABLE_FOR_COL(P_TABLE_NAME, P_COLUMN_NAME, L_NULLABLE);
+        
+            /* if current nullable status is different than requested */
+            IF L_NULLABLE <> P_NULLABLE THEN
+            
+                /* generate a null / not null clause to change it */
+                L_NULL_CLAUSE := GET_NULL_CLAUSE_FROM_Y_N(P_NULLABLE);
+            END IF;
+        
+            EXECUTE_MODIFY_COLUMN(P_TABLE_NAME, P_COLUMN_NAME, P_COLUMN_TYPE, P_DEFAULT, L_NULL_CLAUSE);
+        
+            /* no column with requested name */
+        ELSE
+        
+            /* generate a null / not null clause */
+            L_NULL_CLAUSE := GET_NULL_CLAUSE_FROM_Y_N(P_NULLABLE);
+        
+            EXECUTE_ADD_COLUMN(P_TABLE_NAME, P_COLUMN_NAME, P_COLUMN_TYPE, P_DEFAULT, L_NULL_CLAUSE);
+        END IF;
+    
+        UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_ADD_COLUMN;
+
+    PROCEDURE SAFE_DROP_INDEX(P_STEP_ID NUMBER, P_INDEX_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_INDEX_WITH_NAME(P_INDEX_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_INDEX(P_INDEX_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_INDEX;
+
+    PROCEDURE SAFE_DROP_COLUMN(P_STEP_ID NUMBER, P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    
+    BEGIN
+    
+        EXISTS_COL_BY_TABLE_AND_NAME(P_TABLE_NAME, P_COLUMN_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_COLUMN(P_TABLE_NAME, P_COLUMN_NAME);
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_COLUMN;
+
+    PROCEDURE SAFE_DROP_CONSTRAINT(P_STEP_ID NUMBER, P_TABLE_NAME VARCHAR2,
+                                                                 P_CONSTRAINT_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+        EXISTS_CONS_BY_TABLE_AND_NAME(P_TABLE_NAME, P_CONSTRAINT_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_CONSTRAINT(P_TABLE_NAME, P_CONSTRAINT_NAME);
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_CONSTRAINT;
+    PROCEDURE SAFE_DROP_PKG(P_STEP_ID NUMBER, P_PKG_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_PKG_WITH_NAME(P_PKG_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_PKG(P_PKG_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_PKG;
+    PROCEDURE SAFE_DROP_PROCEDURE(P_STEP_ID NUMBER, P_PROCEDURE_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_PROCEDURE_WITH_NAME(P_PROCEDURE_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_PROCEDURE(P_PROCEDURE_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_PROCEDURE;
+    PROCEDURE SAFE_DROP_FUNCTION(P_STEP_ID NUMBER, P_FUNCTION_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_FUNCTION_WITH_NAME(P_FUNCTION_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_FUNCTION(P_FUNCTION_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_FUNCTION;
+
+    PROCEDURE SAFE_DROP_SEQUENCE(P_STEP_ID NUMBER, P_SEQUENCE_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_SEQUENCE_WITH_NAME(P_SEQUENCE_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_SEQUENCE(P_SEQUENCE_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_SEQUENCE;
+    PROCEDURE SAFE_DROP_VIEW(P_STEP_ID NUMBER, P_VIEW_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_VIEW_WITH_NAME(P_VIEW_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_VIEW(P_VIEW_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_VIEW;
+    PROCEDURE SAFE_DROP_MVIEW(P_STEP_ID NUMBER, P_MVIEW_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_MVIEW_WITH_NAME(P_MVIEW_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_MVIEW(P_MVIEW_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_MVIEW;
+
+    PROCEDURE SAFE_DROP_MVIEW_LOG(P_STEP_ID NUMBER, P_BASE_TABLE_NAME VARCHAR2) IS
+        L_EXISTS NUMBER(1);
+    BEGIN
+    
+        EXISTS_MVIEW_LOG_FOR_TABLE(P_BASE_TABLE_NAME, L_EXISTS);
+    
+        IF L_EXISTS = 1 THEN
+        
+            EXECUTE_DROP_MVIEW_LOG(P_BASE_TABLE_NAME);
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END SAFE_DROP_MVIEW_LOG;
+
+    PROCEDURE SAFE_DROP_TABLE(P_STEP_ID NUMBER, P_TABLE_NAME VARCHAR2) IS
+        L_EXISTS NUMBER;
+    
+    BEGIN
+        SELECT COUNT(*) INTO L_EXISTS FROM USER_TABLES T WHERE T.TABLE_NAME = P_TABLE_NAME;
+    
+        IF L_EXISTS = 1 THEN
+            ALTERFKSREFERRINGTABLE(PACTION => 'drop', PTABLE => P_TABLE_NAME);
+        
+            EXECUTE_DROP_TABLE(P_TABLE_NAME);
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_DONE);
+        ELSE
+            NULL;
+        
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_REDUNDENT);
+        END IF;
+    
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(P_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+        
+    END SAFE_DROP_TABLE;
+
+    /*
+  --------------------------------------------------------------------------------------------------------------------------------------
+  
+    package public methods start here
+    
+  --------------------------------------------------------------------------------------------------------------------------------------       
+  */
+
+    /*
+  
+       execute procedures ( not in use yet )
+       
+  */
+
+    PROCEDURE EXECUTE_ALL IS
+    BEGIN
+        NULL;
+    END EXECUTE_ALL;
+    PROCEDURE EXECUTE_TABLE(P_TABLE_NAME VARCHAR2) IS
+    BEGIN
+        NULL;
+    END EXECUTE_TABLE;
+
+    /*
+  
+       action procedures
+       
+  */
+
+    PROCEDURE ADD_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2, P_COLUMN_TYPE VARCHAR2,
+                                             P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2) IS
+        L_TABLE_NAME  VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_COLUMN_NAME VARCHAR2(30) := SANITIZE(P_COLUMN_NAME);
+        L_COLUMN_TYPE VARCHAR2(30) := SANITIZE(P_COLUMN_TYPE);
+        L_NULLABLE    VARCHAR2(30) := SANITIZE(P_NULLABLE);
+        L_DEFAULT     VARCHAR2(1000) := SANITIZE(P_DEFAULT);
+        L_STEP_ID     NUMBER;
+    BEGIN
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             ALTER_ACTION,
+             ALTER_OBJECT_TYPE,
+             COLUMN_NAME,
+             COLUMN_TYPE,
+             COLUMN_DEFAULT,
+             COLUMN_NULLABLE)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_ALTER,
+             C_OBJECT_TYPE_TABLE,
+             L_TABLE_NAME,
+             C_ALTER_ACTION_ADD,
+             C_ALTER_OBJECT_TYPE_COLUMN,
+             L_COLUMN_NAME,
+             L_COLUMN_TYPE,
+             L_DEFAULT,
+             L_NULLABLE)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_ADD_COLUMN(L_STEP_ID, L_TABLE_NAME, L_COLUMN_NAME, L_COLUMN_TYPE, L_NULLABLE, L_DEFAULT);
+    
+    END;
+
+    PROCEDURE DROP_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2) IS
+        L_TABLE_NAME  VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_COLUMN_NAME VARCHAR2(30) := SANITIZE(P_COLUMN_NAME);
+        L_STEP_ID     NUMBER;
+    BEGIN
+    
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             ALTER_ACTION,
+             ALTER_OBJECT_TYPE,
+             COLUMN_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_ALTER,
+             C_OBJECT_TYPE_TABLE,
+             P_TABLE_NAME,
+             C_ALTER_ACTION_DROP,
+             C_ALTER_OBJECT_TYPE_COLUMN,
+             L_COLUMN_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+    
+        SAFE_DROP_COLUMN(L_STEP_ID, L_TABLE_NAME, L_COLUMN_NAME);
+    
+    END;
+
+    PROCEDURE MODIFY_COLUMN(P_TABLE_NAME VARCHAR2, P_COLUMN_NAME VARCHAR2, P_COLUMN_TYPE VARCHAR2,
+                                                    P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2) IS
+        L_TABLE_NAME  VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_COLUMN_NAME VARCHAR2(30) := SANITIZE(P_COLUMN_NAME);
+        L_COLUMN_TYPE VARCHAR2(30) := SANITIZE(P_COLUMN_TYPE);
+        L_NULLABLE    VARCHAR2(30) := SANITIZE(P_NULLABLE);
+        L_DEFAULT     VARCHAR2(1000) := SANITIZE(P_DEFAULT);
+        L_STEP_ID     NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             ALTER_ACTION,
+             ALTER_OBJECT_TYPE,
+             COLUMN_NAME,
+             COLUMN_TYPE,
+             COLUMN_DEFAULT,
+             COLUMN_NULLABLE)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_ALTER,
+             C_OBJECT_TYPE_TABLE,
+             P_TABLE_NAME,
+             C_ALTER_ACTION_MODIFY,
+             C_ALTER_OBJECT_TYPE_COLUMN,
+             L_COLUMN_NAME,
+             L_COLUMN_TYPE,
+             L_DEFAULT,
+             L_NULLABLE)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+    
+        ADD_COLUMN(L_TABLE_NAME, L_COLUMN_NAME, L_COLUMN_TYPE, L_NULLABLE, L_DEFAULT);
+    
+    END;
+
+    -- Refactored procedure exists_index_with_name 
+
+    PROCEDURE CREATE_INDEX(P_TABLE_NAME VARCHAR2, P_INDEX_NAME VARCHAR2, P_COLUMNS VARCHAR2,
+                                                 P_UNIQUE NUMBER, P_REVERSE NUMBER, P_GLOBAL NUMBER) IS
+    
+        L_TABLE_NAME VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_INDEX_NAME VARCHAR2(30) := SANITIZE(P_INDEX_NAME);
+        L_COLUMNS    VARCHAR2(32767) := SANITIZE(P_COLUMNS);
+        L_UNIQUE     VARCHAR2(30) := SANITIZE(P_UNIQUE);
+        L_STEP_ID    NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             TABLE_COLUMNS,
+             INDEX_UNIQUE)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_CREATE,
+             C_OBJECT_TYPE_INDEX,
+             P_INDEX_NAME,
+             P_COLUMNS,
+             P_UNIQUE)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+    
+        SAFE_CREATE_INDEX(L_STEP_ID,
+                                            L_TABLE_NAME,
+                                            L_INDEX_NAME,
+                                            L_COLUMNS,
+                                            L_UNIQUE,
+                                            P_REVERSE,
+                                            P_GLOBAL);
+    
+    END CREATE_INDEX;
+
+    PROCEDURE DROP_INDEX(P_INDEX_NAME VARCHAR2) IS
+        L_INDEX_NAME VARCHAR2(30) := SANITIZE(P_INDEX_NAME);
+        L_STEP_ID    NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_INDEX,
+             L_INDEX_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+    
+        SAFE_DROP_INDEX(L_STEP_ID, L_INDEX_NAME);
+    
+    END DROP_INDEX;
+
+    PROCEDURE DROP_CONSTRAINT(P_TABLE_NAME VARCHAR2, P_CONSTRAINT_NAME VARCHAR2) IS
+        L_TABLE_NAME      VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_CONSTRAINT_NAME VARCHAR2(30) := SANITIZE(P_CONSTRAINT_NAME);
+        L_STEP_ID         NUMBER;
+    BEGIN
+    
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             ALTER_ACTION,
+             ALTER_OBJECT_TYPE,
+             ALTER_OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_ALTER,
+             C_OBJECT_TYPE_TABLE,
+             L_TABLE_NAME,
+             C_ALTER_ACTION_DROP,
+             C_ALTER_OBJECT_TYPE_CONSTRAINT,
+             L_CONSTRAINT_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_CONSTRAINT(L_STEP_ID, L_TABLE_NAME, L_CONSTRAINT_NAME);
+    
+    END DROP_CONSTRAINT;
+    PROCEDURE DROP_PKG(P_PKG_NAME VARCHAR2) IS
+    
+        L_PKG_NAME VARCHAR2(30) := SANITIZE(P_PKG_NAME);
+        L_STEP_ID  NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_PACKAGE,
+             L_PKG_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_PKG(L_STEP_ID, L_PKG_NAME);
+    
+    END DROP_PKG;
+    PROCEDURE DROP_PROCEDURE(P_PROCEDURE_NAME VARCHAR2) IS
+    
+        L_PROCEDURE_NAME VARCHAR2(30) := SANITIZE(P_PROCEDURE_NAME);
+        L_STEP_ID        NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_PROCEDURE,
+             L_PROCEDURE_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_PROCEDURE(L_STEP_ID, L_PROCEDURE_NAME);
+    
+    END DROP_PROCEDURE;
+    PROCEDURE DROP_FUNCTION(P_FUNCTION_NAME VARCHAR2) IS
+    
+        L_FUNCTION_NAME VARCHAR2(30) := SANITIZE(P_FUNCTION_NAME);
+        L_STEP_ID       NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_FUNCTION,
+             L_FUNCTION_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_FUNCTION(L_STEP_ID, L_FUNCTION_NAME);
+    
+    END DROP_FUNCTION;
+
+    PROCEDURE DROP_SEQUENCE(P_SEQUENCE_NAME VARCHAR2) IS
+    
+        L_SEQUENCE_NAME VARCHAR2(30) := SANITIZE(P_SEQUENCE_NAME);
+        L_STEP_ID       NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_SEQUENCE,
+             L_SEQUENCE_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_SEQUENCE(L_STEP_ID, L_SEQUENCE_NAME);
+    
+    END DROP_SEQUENCE;
+    PROCEDURE DROP_VIEW(P_VIEW_NAME VARCHAR2) IS
+    
+        L_VIEW_NAME VARCHAR2(30) := SANITIZE(P_VIEW_NAME);
+        L_STEP_ID   NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_VIEW,
+             L_VIEW_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_VIEW(L_STEP_ID, L_VIEW_NAME);
+    
+    END DROP_VIEW;
+    PROCEDURE DROP_MVIEW(P_MVIEW_NAME VARCHAR2) IS
+    
+        L_MVIEW_NAME VARCHAR2(30) := SANITIZE(P_MVIEW_NAME);
+        L_STEP_ID    NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_MVIEW,
+             L_MVIEW_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_MVIEW(L_STEP_ID, L_MVIEW_NAME);
+    
+    END DROP_MVIEW;
+
+    PROCEDURE DROP_MVIEW_LOG(P_TABLE_NAME VARCHAR2) IS
+    
+        L_TABLE_NAME VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_STEP_ID        NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_MVIEW_LOG,
+             L_TABLE_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_MVIEW_LOG(L_STEP_ID, L_TABLE_NAME);
+    
+    END DROP_MVIEW_LOG;
+
+    PROCEDURE DROP_TABLE(P_TABLE_NAME VARCHAR2) IS
+        L_TABLE_NAME VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+    
+        L_STEP_ID NUMBER;
+    BEGIN
+    
+        -- safe_add_column modifies column if it already exists
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_DROP,
+             C_OBJECT_TYPE_TABLE,
+             L_TABLE_NAME)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        SAFE_DROP_TABLE(L_STEP_ID, L_TABLE_NAME);
+    
+    END DROP_TABLE;
+    
+
+    PROCEDURE EXECUTE_RENAME_COLUMN(P_TABLE_NAME IN VARCHAR2, P_OLD_COLUMN_NAME VARCHAR2, P_NEW_COLUMN_NAME VARCHAR2,
+                                            P_COLUMN_TYPE IN VARCHAR2, L_NULL_CLAUSE IN OUT VARCHAR2, P_DEFAULT IN VARCHAR2) IS
+        L_STATEMENT VARCHAR2(32767);
+        L_COLUMN_TYPE VARCHAR2(40);
+        l_temp_table_name VARCHAR2(40);
+        L_IS_NEW_COL_EXIST  number;
+        L_IS_OLD_COL_EXIST  number;
+        
+        l_need_to_rename    boolean := true;
+        
+        l_DATA_TYPE_1       user_tab_columns.DATA_TYPE%type;
+        l_DATA_LENGTH_1     user_tab_columns.DATA_LENGTH%type;
+        l_DATA_PRECISION_1  user_tab_columns.DATA_PRECISION%type;
+        l_DATA_SCALE_1      user_tab_columns.DATA_SCALE%type;
+        l_NULLABLE_1        user_tab_columns.NULLABLE%type;
+        l_DATA_DEFAULT_1    varchar2(4000);
+
+        l_DATA_TYPE_2       user_tab_columns.DATA_TYPE%type;
+        l_DATA_LENGTH_2     user_tab_columns.DATA_LENGTH%type;
+        l_DATA_PRECISION_2  user_tab_columns.DATA_PRECISION%type;
+        l_DATA_SCALE_2      user_tab_columns.DATA_SCALE%type;
+        l_NULLABLE_2        user_tab_columns.NULLABLE%type;
+        l_DATA_DEFAULT_2    varchar2(4000);
+
+    BEGIN
+        select count(*)
+          into L_IS_OLD_COL_EXIST
+          from user_tab_columns
+         where table_name = P_TABLE_NAME
+           and column_name = P_OLD_COLUMN_NAME;
+           
+        select count(*)
+          into L_IS_NEW_COL_EXIST
+          from user_tab_columns
+         where table_name = P_TABLE_NAME
+           and column_name = P_NEW_COLUMN_NAME;
+           
+        if L_IS_OLD_COL_EXIST = 0 and L_IS_NEW_COL_EXIST = 1 then
+            
+            l_temp_table_name := 'TEMP_' || to_char(sysdate, 'DDMMYYYY_HH24MI');
+            
+            -- Need to compare the exist column to the wanted one
+            EXECUTE IMMEDIATE 'create table ' || l_temp_table_name || ' (a number)';
+            
+            EXECUTE_ADD_COLUMN(l_temp_table_name, P_NEW_COLUMN_NAME, P_COLUMN_TYPE, P_DEFAULT, L_NULL_CLAUSE);
+            
+            select DATA_TYPE, nvl(DATA_LENGTH, 0), nvl(DATA_PRECISION, 0), nvl(DATA_SCALE, 0), nvl(NULLABLE, '0'), DATA_DEFAULT
+              into l_DATA_TYPE_1, l_DATA_LENGTH_1, l_DATA_PRECISION_1,
+                   l_DATA_SCALE_1, l_NULLABLE_1, l_DATA_DEFAULT_1
+            from user_tab_columns
+            where table_name = P_TABLE_NAME and column_name = P_NEW_COLUMN_NAME;
+            
+            select DATA_TYPE, nvl(DATA_LENGTH, 0), nvl(DATA_PRECISION, 0), nvl(DATA_SCALE, 0), nvl(NULLABLE, '0'), DATA_DEFAULT
+              into l_DATA_TYPE_2, l_DATA_LENGTH_2, l_DATA_PRECISION_2,
+                   l_DATA_SCALE_2, l_NULLABLE_2, l_DATA_DEFAULT_2
+            from user_tab_columns
+            where table_name = l_temp_table_name and column_name = P_NEW_COLUMN_NAME;
+            
+            if l_DATA_TYPE_1 = 'NUMBER' and l_DATA_TYPE_2 = 'NUMBER' then
+                l_DATA_DEFAULT_1 := to_char(to_number(translate (l_DATA_DEFAULT_1, '()''', ' ')));
+                l_DATA_DEFAULT_2 := to_char(to_number(translate (l_DATA_DEFAULT_2, '()''', ' ')));
+            end if;
+
+            if l_DATA_TYPE_1 = l_DATA_TYPE_2 and l_DATA_LENGTH_1 = l_DATA_LENGTH_2 and
+                l_DATA_PRECISION_1 = l_DATA_PRECISION_2 and l_DATA_SCALE_1 = l_DATA_SCALE_2 and
+                l_NULLABLE_1 = l_NULLABLE_2 and nvl(l_DATA_DEFAULT_1, 'NULL') = nvl(l_DATA_DEFAULT_2, 'NULL') then
+                
+              DBMS_OUTPUT.PUT_LINE('Nothing Executed: Column already renamed.');
+              
+              l_need_to_rename := false;
+            else
+              DBMS_OUTPUT.PUT_LINE('Column already exist with wrong definition.');
+              
+              -- Need to failed
+              l_need_to_rename := true;
+            end if;
+            
+            EXECUTE IMMEDIATE 'drop table ' || l_temp_table_name ;
+        end if;
+        
+        if l_need_to_rename then
+            L_STATEMENT := 'alter table ' || P_TABLE_NAME || ' rename column ' || P_OLD_COLUMN_NAME || ' TO ' || P_NEW_COLUMN_NAME ;
+            DBMS_OUTPUT.PUT_LINE('Executed: "' || L_STATEMENT || '"');
+            EXECUTE IMMEDIATE L_STATEMENT;
+        end if;
+        
+    END EXECUTE_RENAME_COLUMN;
+    
+    PROCEDURE RENAME_COLUMN(P_TABLE_NAME VARCHAR2, P_OLD_COLUMN_NAME VARCHAR2, P_NEW_COLUMN_NAME VARCHAR2, 
+                                P_COLUMN_TYPE VARCHAR2, P_NULLABLE VARCHAR2, P_DEFAULT VARCHAR2) IS
+        L_TABLE_NAME  VARCHAR2(30) := SANITIZE(P_TABLE_NAME);
+        L_OLD_COLUMN_NAME VARCHAR2(30) := SANITIZE(P_OLD_COLUMN_NAME);
+        L_NEW_COLUMN_NAME VARCHAR2(30) := SANITIZE(P_NEW_COLUMN_NAME);
+        L_COLUMN_TYPE VARCHAR2(30) := SANITIZE(P_COLUMN_TYPE);
+        L_NULLABLE    VARCHAR2(30) := SANITIZE(P_NULLABLE);
+        L_DEFAULT     VARCHAR2(1000) := SANITIZE(P_DEFAULT);
+        L_STEP_ID     NUMBER;
+        L_NULL_CLAUSE VARCHAR2(10) := '';
+    BEGIN
+        INSERT INTO UPGRADE_STEPS
+            (ID,
+             ACTION,
+             OBJECT_TYPE,
+             OBJECT_NAME,
+             ALTER_ACTION,
+             ALTER_OBJECT_TYPE,
+             COLUMN_NAME,
+             COLUMN_TYPE,
+             COLUMN_DEFAULT,
+             COLUMN_NULLABLE)
+        VALUES
+            (UPGRADE_STEPS_SEQ.NEXTVAL,
+             C_ACTION_ALTER,
+             C_OBJECT_TYPE_TABLE,
+             P_TABLE_NAME,
+             C_ALTER_ACTION_MODIFY,
+             C_ALTER_OBJECT_TYPE_COLUMN,
+             L_NEW_COLUMN_NAME,
+             L_COLUMN_TYPE,
+             L_DEFAULT,
+             L_NULLABLE)
+        RETURNING ID INTO L_STEP_ID;
+        COMMIT;
+        
+        L_NULL_CLAUSE := GET_NULL_CLAUSE_FROM_Y_N(P_NULLABLE);
+        EXECUTE_RENAME_COLUMN(L_TABLE_NAME, L_OLD_COLUMN_NAME, L_NEW_COLUMN_NAME, L_COLUMN_TYPE, L_NULL_CLAUSE, L_DEFAULT);
+        
+        UPDATE_STEP_STATUS(L_STEP_ID, C_STATUS_DONE);
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE_STEP_STATUS(L_STEP_ID, C_STATUS_ERROR, SQLERRM);
+            RAISE;
+    END;    
+    
+
+    PROCEDURE safe_execute (cmd VARCHAR2, 
+                            ignorecode VARCHAR2, 
+                            verbose BOOLEAN default true) AS
+        v_cnt   NUMBER := 0;
+    BEGIN
+       EXECUTE IMMEDIATE cmd;
+    EXCEPTION
+       WHEN OTHERS
+       THEN
+          BEGIN
+             FOR r IN (    SELECT REGEXP_SUBSTR (ignorecode,
+                                                 '[^,]+',
+                                                 1,
+                                                 LEVEL)
+                                     element
+                             FROM DUAL
+                       CONNECT BY LEVEL <= LENGTH (REGEXP_REPLACE (ignorecode, '[^,]+')) + 1)
+             LOOP
+                IF (SQLCODE = TO_NUMBER (r.element, '99999'))
+                THEN
+                   if verbose = TRUE
+                   then
+                       DBMS_OUTPUT.put_line ('Info: Command returned expected code ' || r.element || ' skipping. command: ' || cmd);
+                   end if;
+                   v_cnt := v_cnt + 1;
+                END IF;
+             END LOOP;
+
+             IF v_cnt = 0
+             THEN
+                RAISE;
+             END IF;
+          EXCEPTION
+             WHEN VALUE_ERROR
+             THEN
+                DBMS_OUTPUT.put_line ('.');
+                DBMS_OUTPUT.put_line ('Info: safe_execute second parameter should contain numbers seperated');
+                DBMS_OUTPUT.put_line ('.     with comma delimiter, each one should have maximum 5 digits');
+                DBMS_OUTPUT.put_line ('.     you entered:  ' || ignorecode);
+          END;
+    END safe_execute;
+
+    PROCEDURE execute_with_condition (p_sql_query         VARCHAR2, 
+                                      p_check_operator     VARCHAR2, 
+                                      v_limit_value     VARCHAR2,
+                                      p_cmd             VARCHAR2) AS
+        l_cnt   NUMBER;
+    BEGIN
+        execute immediate 'select 1 from dual where (' || p_sql_query || ') ' || p_check_operator || v_limit_value into l_cnt;
+        
+        execute immediate p_cmd;
+    EXCEPTION
+       WHEN NO_DATA_FOUND THEN
+         DBMS_OUTPUT.put_line ('Info: execute_with_condition. Condition was not held. Skipping command: ' || p_cmd);
+    END execute_with_condition;
+BEGIN
+    NULL;
+END;
+/

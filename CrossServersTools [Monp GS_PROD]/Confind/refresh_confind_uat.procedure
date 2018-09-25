@@ -1,0 +1,8 @@
+CREATE OR REPLACE procedure refresh_confind_uat as
+BEGIN
+    REFRASH_ACTIVE_APP_LIST_PKG.REFRASH_ACTIVE_APP_LIST;
+    
+    confind.get_data;
+    confind.post_data;            
+end;
+/
